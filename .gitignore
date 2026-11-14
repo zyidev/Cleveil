@@ -18,3 +18,5 @@ docs/_t.csv
 
 # 开发者内部文档（不发布到 GitHub）
 DEVNOTES.md
+
+dist/
