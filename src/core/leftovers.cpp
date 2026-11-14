@@ -1,0 +1,757 @@
+// ============================================================================
+//  leftovers.cpp —— 残留扫描 + 安全清理
+//
+//  扫描思路（Geek / IObit 这类工具的基本套路）：
+//    1) 从程序名、安装目录名、发布者里提炼"关键词令牌"
+//    2) 拿令牌去匹配：注册表 Software 子树、安装目录、AppData 目录、
+//       快捷方式、服务、Run 启动项、计划任务
+//    3) 命中的条目区分"强匹配 / 弱匹配"，弱匹配默认不勾选，交给用户判断
+//
+//  安全原则：只列出来给用户看，绝不偷偷删；删除时目录进回收站、
+//           注册表先导出 .reg 备份，系统关键路径一律拒绝。
+// ============================================================================
+
+#include "core/leftovers.h"
+#include "core/winutil.h"
+
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QSet>
+#include <QStandardPaths>
+#include <QStringList>
+
+#include <algorithm>
+#include <vector>
+
+namespace un {
+
+namespace {
+
+// ===========================================================================
+//  一、关键词与文本工具
+// ===========================================================================
+
+// 这些词太常见，参与匹配会造成大面积误伤，直接排除
+const QStringList &stopWords()
+{
+    static const QStringList words = {
+        QStringLiteral("setup"), QStringLiteral("update"), QStringLiteral("updater"),
+        QStringLiteral("installer"), QStringLiteral("install"), QStringLiteral("uninstall"),
+        QStringLiteral("microsoft"), QStringLiteral("windows"), QStringLiteral("program"),
+        QStringLiteral("programs"), QStringLiteral("application"), QStringLiteral("apps"),
+        QStringLiteral("client"), QStringLiteral("server"), QStringLiteral("service"),
+        QStringLiteral("services"), QStringLiteral("driver"), QStringLiteral("drivers"),
+        QStringLiteral("tool"), QStringLiteral("tools"), QStringLiteral("manager"),
+        QStringLiteral("suite"), QStringLiteral("edition"), QStringLiteral("version"),
+        QStringLiteral("beta"), QStringLiteral("alpha"), QStringLiteral("trial"),
+        QStringLiteral("free"), QStringLiteral("pro"), QStringLiteral("lite"),
+        QStringLiteral("portable"), QStringLiteral("runtime"), QStringLiteral("framework"),
+        QStringLiteral("library"), QStringLiteral("libraries"), QStringLiteral("plugin"),
+        QStringLiteral("plugins"), QStringLiteral("codec"), QStringLiteral("player"),
+        QStringLiteral("viewer"), QStringLiteral("editor"), QStringLiteral("reader"),
+        QStringLiteral("studio"), QStringLiteral("code"), QStringLiteral("helper"),
+        QStringLiteral("component"), QStringLiteral("components"), QStringLiteral("module"),
+        QStringLiteral("x64"), QStringLiteral("x86"), QStringLiteral("win32"), QStringLiteral("win64")
+    };
+    return words;
+}
+
+// 原始候选词 → 归一化令牌（去停用词）
+QStringList prepareTokens(const QStringList &raw)
+{
+    QStringList out;
+    for (const QString &r : raw) {
+        const QString t = normalizeToken(r);
+        if (t.size() < 3) continue;
+        if (stopWords().contains(t)) continue;
+        if (!out.contains(t)) out << t;
+    }
+    return out;
+}
+
+// 拆词：按空白和常见分隔符切开，只保留长度 >= 4 的词
+QStringList splitWords(const QString &text)
+{
+    QString s = text;
+    s.replace(QRegularExpression(QStringLiteral("[\\s\\-_/\\\\|,;:.()\\[\\]{}+&]+")),
+              QStringLiteral(" "));
+
+    QStringList out;
+    for (const QString &w : s.split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+        if (w.size() >= 4) out << w;
+    }
+    return out;
+}
+
+// 0 = 不匹配；1 = 强匹配（程序名/目录名）；2 = 弱匹配（发布者/厂商）
+int matchStrength(const QString &text, const QStringList &strong, const QStringList &soft)
+{
+    const QString t = normalizeToken(text);
+    if (t.size() < 3) return 0;
+
+    for (const QString &c : strong) {
+        if (t == c) return 1;
+        if (c.size() >= 5 && t.contains(c)) return 1;
+        if (t.size() >= 5 && c.contains(t)) return 1;
+    }
+    for (const QString &c : soft) {
+        if (t == c) return 2;
+        if (c.size() >= 5 && t.contains(c)) return 2;
+        if (t.size() >= 5 && c.contains(t)) return 2;
+    }
+    return 0;
+}
+
+// 从命令行里抠出可执行文件路径
+QString extractExePath(const QString &commandLine)
+{
+    QString s = commandLine.trimmed();
+    if (s.isEmpty()) return QString();
+
+    if (s.startsWith(QLatin1Char('"'))) {
+        const int end = s.indexOf(QLatin1Char('"'), 1);
+        if (end > 1) return s.mid(1, end - 1);
+    }
+
+    if (s.startsWith(QLatin1String("\\??\\"))) s = s.mid(4);
+
+    const QString lower = s.toLower();
+    const int exePos = lower.indexOf(QStringLiteral(".exe"));
+    if (exePos > 0) return s.left(exePos + 4);
+
+    const int space = s.indexOf(QLatin1Char(' '));
+    return space > 0 ? s.left(space) : s;
+}
+
+// 枚举一个键下的所有子键名
+QStringList enumSubKeys(HKEY parent)
+{
+    QStringList names;
+    wchar_t buf[512];
+    DWORD index = 0;
+
+    while (true) {
+        DWORD nameLen = static_cast<DWORD>(sizeof(buf) / sizeof(buf[0]));
+        const LONG ret = RegEnumKeyExW(parent, index, buf, &nameLen,
+                                       nullptr, nullptr, nullptr, nullptr);
+        if (ret == ERROR_NO_MORE_ITEMS) break;
+        if (ret != ERROR_SUCCESS) { ++index; continue; }
+        names << QString::fromStdWString(std::wstring(buf, nameLen));
+        ++index;
+    }
+    return names;
+}
+
+// 枚举一个键下所有"值"（名字 + 字符串数据）
+QVector<QPair<QString, QString>> enumValues(HKEY root, const QString &subPath, bool is64)
+{
+    QVector<QPair<QString, QString>> result;
+
+    const DWORD view = is64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subPath.toStdWString().c_str(), 0, KEY_READ | view, &key)
+        != ERROR_SUCCESS)
+    {
+        return result;
+    }
+
+    wchar_t nameBuf[512];
+    BYTE dataBuf[2048];
+    DWORD index = 0;
+
+    while (true) {
+        DWORD nameLen = static_cast<DWORD>(sizeof(nameBuf) / sizeof(nameBuf[0]));
+        DWORD dataLen = static_cast<DWORD>(sizeof(dataBuf));
+        DWORD type = 0;
+
+        const LONG ret = RegEnumValueW(key, index, nameBuf, &nameLen, nullptr,
+                                       &type, dataBuf, &dataLen);
+        if (ret == ERROR_NO_MORE_ITEMS) break;
+        if (ret != ERROR_SUCCESS) { ++index; continue; }
+
+        const QString name = QString::fromStdWString(std::wstring(nameBuf, nameLen));
+        QString data;
+        if (type == REG_SZ || type == REG_EXPAND_SZ) {
+            data = QString::fromStdWString(
+                std::wstring(reinterpret_cast<const wchar_t *>(dataBuf),
+                             dataLen / sizeof(wchar_t)));
+            if (!data.isEmpty() && data.back() == QChar(0)) data.chop(1);
+        }
+        result.push_back({name, data.trimmed()});
+        ++index;
+    }
+
+    RegCloseKey(key);
+    return result;
+}
+
+// CSV 行解析（schtasks 输出带引号，需要正确处理 "" 转义）
+QStringList parseCsvRow(const QString &line)
+{
+    QStringList fields;
+    QString cur;
+    bool inQuotes = false;
+
+    for (int i = 0; i < line.size(); ++i) {
+        const QChar c = line.at(i);
+        if (c == QLatin1Char('"')) {
+            if (inQuotes && i + 1 < line.size() && line.at(i + 1) == QLatin1Char('"')) {
+                cur.append(QLatin1Char('"'));
+                ++i;
+            } else {
+                inQuotes = !inQuotes;
+            }
+            continue;
+        }
+        if (c == QLatin1Char(',') && !inQuotes) {
+            fields << cur;
+            cur.clear();
+            continue;
+        }
+        cur.append(c);
+    }
+    fields << cur;
+    return fields;
+}
+
+// 文件名里的非法字符替换掉，用于生成备份文件名
+QString sanitizeFileName(const QString &name)
+{
+    QString s = name;
+    s.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]")), QStringLiteral("_"));
+    if (s.size() > 60) s = s.left(60);
+    return s.isEmpty() ? QStringLiteral("backup") : s;
+}
+
+// 目录所属的类别标签
+QString folderCategory(const QString &path)
+{
+    const QString p = QDir::toNativeSeparators(path).toLower();
+    if (p.contains(QStringLiteral("program files"))) return QStringLiteral("安装目录");
+    if (p.contains(QStringLiteral("appdata")) || p.contains(QStringLiteral("programdata")))
+        return QStringLiteral("用户数据 / 配置");
+    return QStringLiteral("其它目录");
+}
+
+} // namespace
+
+// ===========================================================================
+//  二、扫描
+// ===========================================================================
+
+QVector<LeftoverItem> LeftoverScanner::scan(const InstalledApp &app, const ProgressFn &progress)
+{
+    QVector<LeftoverItem> items;
+    QSet<QString> seen;
+
+    auto report = [&progress](const QString &stage, int percent) {
+        if (progress) progress(stage, percent);
+    };
+
+    auto addItem = [&items, &seen](LeftoverItem item) {
+        const QString key = QStringLiteral("%1|%2|%3")
+                                .arg(static_cast<int>(item.kind))
+                                .arg(item.detail.toLower(), item.extra.toLower());
+        if (seen.contains(key)) return;
+        seen.insert(key);
+        items.push_back(item);
+    };
+
+    // ---------- 提炼关键词 ----------
+    const QString cleanLocation = QDir::cleanPath(
+        QDir::toNativeSeparators(expandEnv(app.installLocation.trimmed())));
+
+    QStringList rawStrong;
+    rawStrong << app.name;
+    for (const QString &w : splitWords(app.name)) rawStrong << w;
+    if (!app.installLocation.isEmpty() && QFileInfo(cleanLocation).isDir())
+        rawStrong << QFileInfo(cleanLocation).fileName();
+
+    QStringList rawSoft;
+    if (!app.publisher.isEmpty()) {
+        rawSoft << app.publisher;
+        for (const QString &w : splitWords(app.publisher)) rawSoft << w;
+    }
+
+    const QStringList strong = prepareTokens(rawStrong);
+    const QStringList soft   = prepareTokens(rawSoft);
+
+    // ---------- 1. 卸载登记项本身 ----------
+    {
+        LeftoverItem it;
+        it.kind      = LeftoverKind::RegistryKey;
+        it.category  = QStringLiteral("注册表项");
+        it.title     = QStringLiteral("卸载登记项");
+        it.detail    = app.registryPath;
+        it.is64View  = app.is64View;
+        it.checked   = true;
+        it.note      = QStringLiteral("程序在\"应用列表\"里的登记项");
+        addItem(it);
+    }
+
+    // ---------- 2. 注册表 Software 子树 ----------
+    report(QStringLiteral("正在扫描注册表…"), 8);
+
+    struct HiveSpec { HKEY root; bool is64; const QString &hive; };
+    const HiveSpec hives[] = {
+        {HKEY_LOCAL_MACHINE, true,  QStringLiteral("HKEY_LOCAL_MACHINE")},
+        {HKEY_LOCAL_MACHINE, false, QStringLiteral("HKEY_LOCAL_MACHINE")},
+        {HKEY_CURRENT_USER,  true,  QStringLiteral("HKEY_CURRENT_USER")},
+        {HKEY_CURRENT_USER,  false, QStringLiteral("HKEY_CURRENT_USER")},
+    };
+
+    // 这些顶层键属于系统自身，不参与匹配
+    const QStringList skipTopKeys = {
+        QStringLiteral("Microsoft"), QStringLiteral("Classes"), QStringLiteral("Policies"),
+        QStringLiteral("WOW6432Node"), QStringLiteral("RegisteredApplications"),
+        QStringLiteral("Windows"), QStringLiteral("Windows NT"), QStringLiteral("Clients"),
+        QStringLiteral("ODBC"), QStringLiteral("Khronos"), QStringLiteral("Vulkan")
+    };
+
+    for (const HiveSpec &hive : hives) {
+        const DWORD view = hive.is64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+
+        HKEY softwareKey = nullptr;
+        if (RegOpenKeyExW(hive.root, L"SOFTWARE", 0, KEY_READ | view, &softwareKey)
+            != ERROR_SUCCESS)
+            continue;
+
+        const QStringList subs = enumSubKeys(softwareKey);
+        for (const QString &sub : subs) {
+            if (skipTopKeys.contains(sub, Qt::CaseInsensitive)) continue;
+
+            const int strength = matchStrength(sub, strong, soft);
+            if (strength == 0) continue;
+
+            LeftoverItem it;
+            it.kind     = LeftoverKind::RegistryKey;
+            it.category = QStringLiteral("注册表项");
+            it.title    = sub;
+            it.detail   = QStringLiteral("%1\\SOFTWARE\\%2").arg(hive.hive, sub);
+            it.is64View = hive.is64;
+            it.checked  = (strength == 1);
+            if (strength == 2)
+                it.note = QStringLiteral("按发布者匹配，删除可能影响同厂商其它软件");
+            addItem(it);
+        }
+        RegCloseKey(softwareKey);
+    }
+
+    // ---------- 2b. App Paths（程序路径登记）----------
+    for (const bool is64 : {true, false}) {
+        const DWORD view = is64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+        const QString sub = QStringLiteral(
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths");
+
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub.toStdWString().c_str(), 0,
+                          KEY_READ | view, &key) != ERROR_SUCCESS)
+            continue;
+
+        const QStringList subs = enumSubKeys(key);
+        for (const QString &exe : subs) {
+            HKEY itemKey = nullptr;
+            if (RegOpenKeyExW(key, exe.toStdWString().c_str(), 0, KEY_READ | view, &itemKey)
+                != ERROR_SUCCESS)
+                continue;
+
+            // 默认值就是 exe 的完整路径
+            wchar_t pathBuf[1024] = {};
+            DWORD len = sizeof(pathBuf);
+            DWORD type = 0;
+            QString pathValue;
+            if (RegQueryValueExW(itemKey, nullptr, nullptr, &type,
+                                 reinterpret_cast<LPBYTE>(pathBuf), &len) == ERROR_SUCCESS
+                && type == REG_SZ)
+            {
+                pathValue = QString::fromStdWString(std::wstring(pathBuf));
+            }
+            RegCloseKey(itemKey);
+
+            const bool underInstall = !app.installLocation.isEmpty()
+                                      && !pathValue.isEmpty()
+                                      && isPathUnder(pathValue, cleanLocation);
+            const int strength = matchStrength(exe, strong, soft);
+            if (!underInstall && strength == 0) continue;
+
+            LeftoverItem it;
+            it.kind     = LeftoverKind::RegistryKey;
+            it.category = QStringLiteral("注册表项");
+            it.title    = QStringLiteral("App Paths: %1").arg(exe);
+            it.detail   = QStringLiteral("HKEY_LOCAL_MACHINE\\%1\\%2").arg(sub, exe);
+            it.is64View = is64;
+            it.checked  = underInstall || strength == 1;
+            addItem(it);
+        }
+        RegCloseKey(key);
+    }
+
+    // ---------- 2c. 开机启动项（Run / RunOnce）----------
+    report(QStringLiteral("正在扫描开机启动项…"), 22);
+
+    {
+        const QStringList runSubPaths = {
+            QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+            QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"),
+            QStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\RunServices"),
+            QStringLiteral("Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run")
+        };
+
+        struct RunHive { HKEY root; bool is64; const QString &hive; };
+        const RunHive runHives[] = {
+            {HKEY_LOCAL_MACHINE, true,  QStringLiteral("HKEY_LOCAL_MACHINE")},
+            {HKEY_LOCAL_MACHINE, false, QStringLiteral("HKEY_LOCAL_MACHINE")},
+            {HKEY_CURRENT_USER,  true,  QStringLiteral("HKEY_CURRENT_USER")},
+            {HKEY_CURRENT_USER,  false, QStringLiteral("HKEY_CURRENT_USER")},
+        };
+
+        for (const RunHive &rh : runHives) {
+            for (const QString &runSub : runSubPaths) {
+                const auto values = enumValues(rh.root, runSub, rh.is64);
+                for (const auto &pair : values) {
+                    const QString &valueName = pair.first;
+                    const QString &valueData = pair.second;
+                    if (valueName.isEmpty()) continue;
+
+                    const bool underInstall = !cleanLocation.isEmpty()
+                                              && valueData.contains(cleanLocation, Qt::CaseInsensitive);
+                    const int strength = matchStrength(valueName, strong, soft);
+                    if (!underInstall && strength == 0) continue;
+
+                    LeftoverItem it;
+                    it.kind     = LeftoverKind::RegistryValue;
+                    it.category = QStringLiteral("开机启动");
+                    it.title    = valueName;
+                    it.detail   = QStringLiteral("%1\\%2").arg(rh.hive, runSub);
+                    it.extra    = valueName;
+                    it.is64View = rh.is64;
+                    it.checked  = underInstall || strength == 1;
+                    it.note     = valueData;
+                    addItem(it);
+                }
+            }
+        }
+    }
+
+    // ---------- 3. 安装目录 ----------
+    report(QStringLiteral("正在统计安装目录…"), 35);
+
+    if (!app.installLocation.isEmpty()) {
+        const QString dir = expandEnv(app.installLocation.trimmed());
+        if (QFileInfo(dir).isDir() && !isDangerousPath(dir)) {
+            LeftoverItem it;
+            it.kind      = LeftoverKind::Folder;
+            it.category  = QStringLiteral("安装目录");
+            it.title     = QFileInfo(QDir::cleanPath(QDir::toNativeSeparators(dir))).fileName();
+            it.detail    = QDir::toNativeSeparators(QDir::cleanPath(dir));
+            it.sizeBytes = directorySize(it.detail);
+            it.checked   = true;
+            addItem(it);
+        }
+    }
+
+    // ---------- 4. 常见的用户数据 / 公共目录 ----------
+    report(QStringLiteral("正在扫描用户数据目录…"), 48);
+
+    {
+        // %ProgramFiles% 这类变量在某些环境下取不到，取不到就跳过
+        const QStringList roots = {
+            expandEnv(QStringLiteral("%LOCALAPPDATA%")),
+            expandEnv(QStringLiteral("%LOCALAPPDATA%\\Programs")),
+            expandEnv(QStringLiteral("%APPDATA%")),
+            expandEnv(QStringLiteral("%PROGRAMDATA%")),
+            expandEnv(QStringLiteral("%ProgramFiles%")),
+            expandEnv(QStringLiteral("%ProgramFiles(x86)%"))
+        };
+
+        for (const QString &root : roots) {
+            if (root.isEmpty() || !QDir(root).exists()) continue;
+
+            QDir dir(root);
+            const QFileInfoList entries = dir.entryInfoList(
+                QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::Name);
+
+            for (const QFileInfo &fi : entries) {
+                const QString full = QDir::toNativeSeparators(fi.absoluteFilePath());
+                if (isDangerousPath(full)) continue;
+
+                // 已经作为"安装目录"收录过的，跳过
+                if (!cleanLocation.isEmpty() && isPathUnder(full, cleanLocation)) continue;
+
+                const int strength = matchStrength(fi.fileName(), strong, soft);
+                if (strength == 0) continue;
+
+                LeftoverItem it;
+                it.kind      = LeftoverKind::Folder;
+                it.category  = folderCategory(full);
+                it.title     = fi.fileName();
+                it.detail    = full;
+                it.sizeBytes = directorySize(full);
+                it.checked   = (strength == 1);
+                if (strength == 2)
+                    it.note = QStringLiteral("按发布者匹配，请确认是否属于该程序");
+                addItem(it);
+            }
+        }
+    }
+
+    // ---------- 5. 快捷方式 ----------
+    report(QStringLiteral("正在扫描快捷方式…"), 66);
+
+    {
+        const QString startUser = expandEnv(QStringLiteral(
+            "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs"));
+        const QString startAll = expandEnv(QStringLiteral(
+            "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs"));
+        const QString desktopUser = expandEnv(QStringLiteral("%USERPROFILE%\\Desktop"));
+        const QString desktopAll  = expandEnv(QStringLiteral("%PUBLIC%\\Desktop"));
+
+        const QStringList lnkRoots = {startUser, startAll, desktopUser, desktopAll};
+
+        for (const QString &root : lnkRoots) {
+            if (root.isEmpty() || !QDir(root).exists()) continue;
+
+            QDirIterator it(root, {QStringLiteral("*.lnk")}, QDir::Files,
+                            QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                const QString path = it.next();
+                const QFileInfo fi(path);
+
+                const int strength = matchStrength(fi.completeBaseName(), strong, soft);
+                if (strength != 1) continue;   // 快捷方式只认强匹配，避免误删
+
+                LeftoverItem item;
+                item.kind     = LeftoverKind::File;
+                item.category = QStringLiteral("快捷方式");
+                item.title    = fi.fileName();
+                item.detail   = QDir::toNativeSeparators(path);
+                item.sizeBytes = fi.size();
+                item.checked  = true;
+                addItem(item);
+            }
+        }
+    }
+
+    // ---------- 6. 服务 ----------
+    report(QStringLiteral("正在扫描服务…"), 80);
+
+    if (!strong.isEmpty() || !cleanLocation.isEmpty()) {
+        const QVector<ServiceRef> services = enumerateServices();
+        for (const ServiceRef &svc : services) {
+            const QString exe = expandEnv(extractExePath(svc.binaryPath));
+
+            const bool underInstall = !cleanLocation.isEmpty() && !exe.isEmpty()
+                                      && isPathUnder(exe, cleanLocation);
+            const int strength = matchStrength(svc.displayName, strong, soft);
+            if (!underInstall && strength == 0) continue;
+
+            LeftoverItem it;
+            it.kind          = LeftoverKind::Service;
+            it.category      = QStringLiteral("服务");
+            it.title         = svc.name;
+            it.detail        = svc.displayName.isEmpty() ? svc.binaryPath
+                                                         : QStringLiteral("%1 — %2")
+                                                               .arg(svc.displayName, svc.binaryPath);
+            it.extra         = svc.name;
+            it.requiresAdmin = true;
+            it.checked       = underInstall || strength == 1;
+            it.note          = QStringLiteral("删除服务需要管理员权限");
+            addItem(it);
+        }
+    }
+
+    // ---------- 7. 计划任务 ----------
+    report(QStringLiteral("正在扫描计划任务…"), 92);
+
+    {
+        QProcess proc;
+        proc.setProgram(QStringLiteral("schtasks.exe"));
+        proc.setArguments({QStringLiteral("/query"), QStringLiteral("/fo"), QStringLiteral("CSV"),
+                           QStringLiteral("/v")});
+        proc.start();
+
+        if (proc.waitForFinished(20000)) {
+            // schtasks 走管道输出的是系统 ANSI 编码（中文系统即 GBK）
+            const QString text = QString::fromLocal8Bit(proc.readAllStandardOutput());
+            const QStringList lines = text.split(QRegularExpression(QStringLiteral("[\r\n]+")),
+                                                 Qt::SkipEmptyParts);
+
+            int nameIdx = -1;
+            int runIdx  = -1;
+
+            for (int i = 0; i < lines.size(); ++i) {
+                const QStringList fields = parseCsvRow(lines.at(i));
+
+                if (i == 0) {
+                    // 表头：定位"任务名"和"要运行的任务"两列的位置
+                    for (int c = 0; c < fields.size(); ++c) {
+                        const QString h = fields.at(c).trimmed().toLower();
+                        if (h == QStringLiteral("taskname")) nameIdx = c;
+                        if (h == QStringLiteral("task to run")) runIdx = c;
+                    }
+                    continue;
+                }
+
+                if (nameIdx < 0 || nameIdx >= fields.size()) continue;
+
+                const QString taskName = fields.at(nameIdx).trimmed();
+                const QString taskRun  = (runIdx >= 0 && runIdx < fields.size())
+                                             ? fields.at(runIdx).trimmed() : QString();
+                if (taskName.isEmpty()) continue;
+                // 微软自带任务一律跳过
+                if (taskName.startsWith(QLatin1String("\\Microsoft"))) continue;
+
+                const QString runExe = expandEnv(extractExePath(taskRun));
+                const bool underInstall = !cleanLocation.isEmpty() && !runExe.isEmpty()
+                                          && isPathUnder(runExe, cleanLocation);
+                const int strength = matchStrength(taskName, strong, soft);
+                if (!underInstall && strength == 0) continue;
+
+                LeftoverItem it;
+                it.kind          = LeftoverKind::ScheduledTask;
+                it.category      = QStringLiteral("计划任务");
+                it.title         = taskName;
+                it.detail        = taskRun.isEmpty() ? taskName : taskRun;
+                it.extra         = taskName;
+                it.requiresAdmin = true;
+                it.checked       = underInstall || strength == 1;
+                addItem(it);
+            }
+        } else {
+            proc.kill();
+        }
+    }
+
+    report(QStringLiteral("扫描完成"), 100);
+
+    // ---------- 按类别排序，界面分组显示更整齐 ----------
+    const QStringList order = {
+        QStringLiteral("注册表项"), QStringLiteral("安装目录"), QStringLiteral("用户数据 / 配置"),
+        QStringLiteral("其它目录"), QStringLiteral("快捷方式"), QStringLiteral("开机启动"),
+        QStringLiteral("服务"), QStringLiteral("计划任务")
+    };
+
+    std::stable_sort(items.begin(), items.end(),
+                     [&order](const LeftoverItem &a, const LeftoverItem &b) {
+                         int ia = order.indexOf(a.category);
+                         int ib = order.indexOf(b.category);
+                         if (ia < 0) ia = 999;
+                         if (ib < 0) ib = 999;
+                         if (ia != ib) return ia < ib;
+                         return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+                     });
+
+    return items;
+}
+
+// ===========================================================================
+//  三、清理
+// ===========================================================================
+
+RemovalResult LeftoverRemover::remove(const QVector<LeftoverItem> &items,
+                                       const QString &backupDir)
+{
+    RemovalResult result;
+
+    if (!backupDir.isEmpty()) QDir().mkpath(backupDir);
+
+    int seq = 0;
+    for (const LeftoverItem &item : items) {
+        ++seq;
+        QString error;
+        bool ok = false;
+
+        switch (item.kind) {
+        case LeftoverKind::RegistryKey: {
+            // 删注册表前先导出 .reg，误删了还能双击还原
+            if (!backupDir.isEmpty()) {
+                const QString file = QDir(backupDir).filePath(
+                    QStringLiteral("%1_%2.reg").arg(seq).arg(sanitizeFileName(item.title)));
+                QString backupError;
+                if (backupRegistryKey(item.detail, file, &backupError))
+                    result.backups << file;
+            }
+            ok = deleteRegistryKey(item.detail, item.is64View, &error);
+            break;
+        }
+        case LeftoverKind::RegistryValue:
+            ok = deleteRegistryValue(item.detail, item.extra, item.is64View, &error);
+            break;
+
+        case LeftoverKind::Folder:
+        case LeftoverKind::File:
+            // 走回收站，误删可恢复
+            ok = recyclePaths({item.detail}, &error);
+            break;
+
+        case LeftoverKind::Service:
+            ok = deleteService(item.extra, &error);
+            break;
+
+        case LeftoverKind::ScheduledTask: {
+            QProcess proc;
+            proc.setProgram(QStringLiteral("schtasks.exe"));
+            proc.setArguments({QStringLiteral("/delete"), QStringLiteral("/tn"),
+                               item.extra, QStringLiteral("/f")});
+            proc.start();
+            if (proc.waitForFinished(15000) && proc.exitCode() == 0) {
+                ok = true;
+            } else {
+                error = QStringLiteral("删除计划任务失败（需要管理员权限）");
+            }
+            break;
+        }
+        }
+
+        if (ok) {
+            ++result.successCount;
+            if (item.sizeBytes > 0) result.reclaimedBytes += item.sizeBytes;
+        } else {
+            ++result.failedCount;
+            result.errors << QStringLiteral("%1：%2")
+                                 .arg(item.detail, error.isEmpty() ? QStringLiteral("失败") : error);
+        }
+    }
+
+    return result;
+}
+
+int LeftoverRemover::killRelatedProcesses(const InstalledApp &app)
+{
+    if (app.installLocation.isEmpty()) return 0;
+
+    const QString dir = expandEnv(app.installLocation.trimmed());
+    if (dir.isEmpty()) return 0;
+
+    const QVector<ProcessRef> procs = processesUnder(dir);
+    const quint32 selfPid = static_cast<quint32>(QCoreApplication::applicationPid());
+
+    int killed = 0;
+    for (const ProcessRef &p : procs) {
+        if (p.pid == selfPid) continue;
+        if (killProcess(p.pid, nullptr)) ++killed;
+    }
+    return killed;
+}
+
+QStringList LeftoverRemover::relatedProcessNames(const InstalledApp &app)
+{
+    QStringList names;
+    if (app.installLocation.isEmpty()) return names;
+
+    const QString dir = expandEnv(app.installLocation.trimmed());
+    if (dir.isEmpty()) return names;
+
+    for (const ProcessRef &p : processesUnder(dir)) {
+        names << QStringLiteral("%1 (PID %2)").arg(p.name).arg(p.pid);
+    }
+    return names;
+}
+
+} // namespace un

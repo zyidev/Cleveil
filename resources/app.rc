@@ -1,0 +1,35 @@
+// ============================================================================
+//  app.rc —— Windows 资源脚本
+//  作用一：把 app.ico 嵌入 exe，资源管理器/任务栏/Alt+Tab 显示的就是这个图标
+//  作用二：写入 VERSIONINFO，让"文件属性 → 详细信息"里显示产品名称 Cleveil
+//  #pragma code_page(65001) 告诉资源编译器本文件是 UTF-8，避免中文变乱码
+// ============================================================================
+#pragma code_page(65001)
+
+IDI_ICON1 ICON "app.ico"
+
+1 VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEOS 0x4L
+ FILETYPE 0x1L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "080404b0"
+    BEGIN
+      VALUE "CompanyName",      "Cleveil Project"
+      VALUE "FileDescription",  "Cleveil - Windows 程序卸载与残留清理工具"
+      VALUE "FileVersion",      "1.0.0.0"
+      VALUE "InternalName",     "Cleveil"
+      VALUE "OriginalFilename", "Cleveil.exe"
+      VALUE "ProductName",      "Cleveil"
+      VALUE "ProductVersion",   "1.0.0.0"
+      VALUE "LegalCopyright",   "Copyright (C) 2026 Cleveil Project"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x804, 1200
+  END
+END

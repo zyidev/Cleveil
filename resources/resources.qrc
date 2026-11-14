@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <!-- 运行时图标：Qt 用它设置窗口图标（任务栏缩略图、Alt+Tab 也走这里） -->
+    <qresource prefix="/icons">
+        <file alias="app.png">icon-256.png</file>
+    </qresource>
+</RCC>
