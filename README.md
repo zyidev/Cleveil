@@ -27,32 +27,22 @@ Windows 程序卸载与残留清理工具：扫描已安装程序 → 列表浏�
 
 ## 一、功能一览
 
-| 模块 | 能力 |
-| --- | --- |
-| **程序扫描** | 同时扫描 `HKLM` / `HKCU` 下的 `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` 与 `WOW6432Node` 对应分支（4 条路径），读取 DisplayName / DisplayVersion / Publisher / InstallDate / EstimatedSize / InstallLocation / DisplayIcon / UninstallString / QuietUninstallString / SystemComponent / ReleaseType / ParentKeyName / WindowsInstaller 等值；按 名称+版本+发布者 去重，机器级优先于用户级、64 位视图优先于 32 位视图 |
-| **列表与筛选** | 6 列视图（名称 / 发布者 / 版本 / 安装日期 / 占用 / 类型），真实图标（三级来源：`DisplayIcon` → 卸载器自身图标 → 安装目录），点击表头排序（日期与体积按数值而非字符串排序），实时搜索（名称 / 发布者 / 路径），发布者过滤（全部 / 仅微软 / 仅第三方），可选显示系统组件与更新补丁，支持多选 |
-| **详情面板** | 图标、名称、发布者、版本、安装日期、占用空间、安装类型（MSI / EXE）、安装位置、注册表项全路径、完整卸载命令（可选中复制）；长路径在分隔符后插入零宽空格折行，不会被面板裁掉 |
-| **三种卸载方式** | ① **正常卸载**：调用注册表登记的卸载命令，可多选排队执行；② **静默卸载**：优先用 `QuietUninstallString`，MSI 追加 `/qn /norestart`，无静默参数的程序明确提示"不支持"而不是硬闯；③ **强制卸载**：结束相关进程 + 备份并删除注册表登记项 + 进入残留清理流程 |
-| **批量卸载向导**（新增） | 三步向导：① 勾选程序（带全选/全不选/反选，主界面已选中的项自动带入）② 选策略（优先静默 / 逐项确认 / 卸载后自动清残留）③ 执行（进度条 + 逐条时间戳日志 + 成功失败跳过汇总，可随时停止，停止请求在当前一项结束后生效） |
-| **实时安装监控**（新增） | 对四条 Uninstall 键挂 `RegNotifyChangeKeyValue`（内核写入时主动唤醒，无需轮询）+ 每 2 秒侦测 `msiexec` / `setup.exe` 等安装器进程；新装程序秒级出现并以绿色高亮，可当场卸载或扫描残留；卸载事件同样被捕获。检测到设备 `\\.\CleveilMon` 时自动切换为"内核驱动通道" |
-| **数字签名**（新增） | 内置 Authenticode 验签：`WinVerifyTrust` 判完整性 + 证书链，`CryptQueryObject` 取签名者/签发者；配套 `scripts/sign.ps1` 支持自签名测试证书 / PFX / 证书指纹 + RFC3161 时间戳，详见 [docs/SIGNING.md](docs/SIGNING.md) |
-| **残留清理** | 多线程扫描注册表（SOFTWARE 子树、App Paths、Run 启动项）、安装目录、`LOCALAPPDATA` / `APPDATA` / `PROGRAMDATA` / `Program Files` 下的同名目录、开始菜单与桌面快捷方式、Windows 服务、计划任务；按关键词强弱两级匹配，弱匹配默认**不勾选**；删除前把注册表项导出为 `.reg` 备份，目录走回收站；"预计释放"按最外层路径去重，父子目录不会重复计算 |
-| **卸载队列** | 顺序执行、逐条日志（带时间戳）、进度条；**成功判定用"注册表项是否消失"核验，而不是相信退出码** |
-| **导出** | CSV（UTF-8 BOM，Excel 直接双击不乱码）与 HTML 报告（带统计汇总与样式表格） |
-| **设置** | 显示系统组件 / 显示更新补丁 / 启动自动扫描 / 静默卸载自动提权 / 删除前备份注册表，全部用 `QSettings` 持久化；窗口尺寸位置也记忆 |
-| **品牌** | 应用名 **Cleveil**，圆角方形渐变图标（深靛蓝 → 青绿 + 白色循环箭头 + 被卸载的小方块），多尺寸 `app.ico`（16/24/32/40/48/64/128/256）嵌入 exe，同时通过 Qt 资源设置窗口图标 |
+- **程序扫描**：读取 `HKLM` / `HKCU` 下 4 条 `Uninstall` 分支（含 `WOW6432Node`）；按 名称+版本+发布者 去重，机器级优先于用户级、64 位视图优先于 32 位视图。
+- **列表与筛选**：6 列视图 + 真实图标（三级来源回退），表头排序（日期与体积按数值），名称 / 发布者 / 路径实时搜索，发布者过滤，可选显示系统组件与更新补丁，支持多选。
+- **详情面板**：图标、版本、安装日期、占用空间、安装类型（MSI / EXE）、安装位置、注册表路径、完整卸载命令（可复制）。
+- **三种卸载方式**：正常卸载（调用登记命令，可排队）/ 静默卸载（`QuietUninstallString`，MSI 追加 `/qn /norestart`，无静默参数则明确不支持）/ 强制卸载（结束进程 + 备份删除登记项 + 转残留清理）。
+- **批量卸载向导**：勾选程序 → 选策略（优先静默 / 逐项确认 / 自动清残留）→ 执行（进度、逐条日志、汇总，可中途停止）。
+- **实时安装监控**：四条 `Uninstall` 键挂 `RegNotifyChangeKeyValue` + 每 2 秒侦测安装器进程，新装程序秒级出现并高亮，卸载事件同样被捕获。
+- **数字签名**：内置 Authenticode 验签（`WinVerifyTrust` + `CryptQueryObject`），配套 `scripts/sign.ps1` 支持自签名证书 / PFX / 指纹 + 时间戳，详见 [docs/SIGNING.md](docs/SIGNING.md)。
+- **残留清理**：扫描注册表、安装目录、`AppData` / `ProgramData`、开始菜单与桌面快捷方式、服务、计划任务；强弱两级匹配（弱匹配默认不勾选），注册表项导出 `.reg` 备份，目录走回收站。
 
 ---
 
 ## 二、界面
 
-| 主窗口 | 批量卸载向导（选择程序） | 安装监控 |
-| --- | --- | --- |
-| ![](docs/screenshot-main.png) | ![](docs/screenshot-batch.png) | ![](docs/screenshot-monitor.png) |
-
-| 批量卸载向导（卸载选项） | 关于窗口 |
+| 主窗口 | 批量卸载向导（选择程序） |
 | --- | --- |
-| ![](docs/screenshot-batch-options.png) | ![](docs/screenshot-about.png) |
+| ![](docs/screenshot-main.png) | ![](docs/screenshot-batch.png) |
 
 ---
 
@@ -76,16 +66,7 @@ cd Cleveil-1.0.0            # 进入项目目录（克隆/解压后的实际路�
 .\build.ps1 -Clean          # 清空 build 后重来
 ```
 
-手工构建：
 
-```bat
-call "C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\Tools\VsDevCmd.bat" -arch=x64
-"C:\Qt\Tools\CMake_64\bin\cmake.exe" -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=C:/Qt/6.11.1/msvc2022_64
-"C:\Qt\Tools\CMake_64\bin\cmake.exe" --build build
-"C:\Qt\6.11.1\msvc2022_64\bin\windeployqt.exe" --release build\Cleveil.exe
-```
-
-产物：`build\Cleveil.exe`（连同同目录下的 Qt DLL 与 `platforms\`、`styles\` 等插件目录一起分发）。
 
 ## 四、目录结构
 
@@ -130,8 +111,7 @@ docs/
 
 本项目以 **MIT License** 发布，见 [LICENSE](LICENSE)。
 
-> **免责声明**：卸载与残留清理是不可逆操作，虽然删除前会备份
-> 注册表项（`.reg`）并把文件移入回收站，仍请先在虚拟机或测试机上验证。作者不对因使用本工具造成的
+> **免责声明**：卸载与残留清理是不可逆操作，作者不对因使用本工具造成的
 > 数据丢失、系统损坏或业务中断负责。
 
 若发现文档与实现不一致，以源码为准；欢迎提 Issue 指出。
