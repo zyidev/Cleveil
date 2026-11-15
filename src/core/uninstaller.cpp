@@ -201,6 +201,8 @@ void UninstallRunner::cleanup()
 {
     if (m_proc) {
         m_proc->disconnect(this);
+        if (m_proc->state() != QProcess::NotRunning)
+            m_proc->kill();
         m_proc->deleteLater();
         m_proc = nullptr;
     }
@@ -213,6 +215,7 @@ void UninstallRunner::cleanup()
 
 void UninstallRunner::run(const UninstallPlan &plan, bool elevate)
 {
+    cleanup();
     m_finished = false;
 
     if (!plan.valid) {
@@ -236,9 +239,8 @@ void UninstallRunner::run(const UninstallPlan &plan, bool elevate)
                 Q_UNUSED(status)
                 if (m_finished) return;
                 m_finished = true;
-                const quint32 c = static_cast<quint32>(code);
-                cleanup();
-                emit finished(true, c, QString());
+                // 不要在这个回调里销毁 QProcess：调用方如果正停在 waitFor* 上会踩空对象
+                emit finished(true, static_cast<quint32>(code), QString());
             });
 
     connect(m_proc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
@@ -247,20 +249,11 @@ void UninstallRunner::run(const UninstallPlan &plan, bool elevate)
             if (m_finished) return;
             m_finished = true;
             const QString reason = m_proc ? m_proc->errorString() : QStringLiteral("未知原因");
-            cleanup();
             emit finished(false, 0, QStringLiteral("无法启动卸载程序：%1").arg(reason));
         }
     });
 
     m_proc->start();
-    // 最多等 5 秒确认进程起来了，避免"点了没反应"
-    if (!m_finished && !m_proc->waitForStarted(5000)) {
-        if (m_finished) return;
-        m_finished = true;
-        const QString reason = m_proc ? m_proc->errorString() : QString();
-        cleanup();
-        emit finished(false, 0, QStringLiteral("无法启动卸载程序：%1").arg(reason));
-    }
 }
 
 void UninstallRunner::startElevated(const UninstallPlan &plan)
@@ -327,13 +320,11 @@ void UninstallRunner::pollElevatedProcess()
 
 void UninstallRunner::terminate()
 {
-    if (m_proc && m_proc->state() != QProcess::NotRunning) {
+    // 只发结束请求。finished 由 QProcess 或轮询回调发出，避免在这里同步等待把界面卡死。
+    if (m_proc && m_proc->state() != QProcess::NotRunning)
         m_proc->kill();
-        m_proc->waitForFinished(2000);
-    }
-    if (m_processHandle) {
+    if (m_processHandle)
         TerminateProcess(reinterpret_cast<HANDLE>(m_processHandle), 1);
-    }
 }
 
 } // namespace un

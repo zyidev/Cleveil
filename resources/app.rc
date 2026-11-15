@@ -9,8 +9,8 @@
 IDI_ICON1 ICON "app.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,1,0,0
+ PRODUCTVERSION 1,1,0,0
  FILEOS 0x4L
  FILETYPE 0x1L
 BEGIN
@@ -20,11 +20,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "Cleveil Project"
       VALUE "FileDescription",  "Cleveil - Windows 程序卸载与残留清理工具"
-      VALUE "FileVersion",      "1.0.0.0"
+      VALUE "FileVersion",      "1.1.0.0"
       VALUE "InternalName",     "Cleveil"
       VALUE "OriginalFilename", "Cleveil.exe"
       VALUE "ProductName",      "Cleveil"
-      VALUE "ProductVersion",   "1.0.0.0"
+      VALUE "ProductVersion",   "1.1.0.0"
       VALUE "LegalCopyright",   "Copyright (C) 2026 Cleveil Project"
     END
   END

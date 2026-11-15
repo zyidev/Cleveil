@@ -41,12 +41,16 @@ QString normalizeToken(const QString &text);
 // 返回路径，index 通过出参带回（默认 0；负数表示资源 ID）。
 QString splitIconSpec(const QString &spec, int *index);
 
-// 判断 child 是否位于 parent 目录之内（大小写不敏感、统一分隔符）。
+// 判断 child 是否位于 parent 目录之内（大小写不敏感、解析 .. 与 \\?\ 前缀）。
 bool isPathUnder(const QString &child, const QString &parent);
 
-// 危险路径防护：拒绝删除盘符根目录、Windows 目录、Program Files 根、用户目录根等。
-// 这是强制卸载的最后一道防线，宁可少删也不能误删。
+// 危险路径防护：拒绝盘符根、Windows 整棵目录、Program Files / ProgramData / Users
+// 的根目录，以及用户配置目录本身。Program Files\某程序 这种子目录允许删除。
+// 回收站、结束进程、残留扫描共用这一判断。
 bool isDangerousPath(const QString &path);
+
+// 系统关键进程（csrss / lsass 等）。对这些进程调用 TerminateProcess 可能直接蓝屏。
+bool isProtectedProcessName(const QString &exeName);
 
 // -------------------------------------------------------------------------
 // 二、图标
@@ -134,6 +138,10 @@ QVector<ProcessRef> processesUnder(const QString &directory);
 
 // 强杀进程。成功返回 true。
 bool killProcess(quint32 pid, QString *error);
+
+// 仅当进程映像仍位于 directory 内、且不是系统关键进程时才结束。
+// 用同一次 OpenProcess 拿到的句柄复核路径，避免 PID 被复用后误杀。
+bool killProcessIfUnder(quint32 pid, const QString &directory, QString *error);
 
 // 枚举某个服务的信息，供残留扫描使用。
 struct ServiceRef {

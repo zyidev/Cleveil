@@ -233,10 +233,12 @@ void InstallMonitor::workerLoop()
                                              : QStringLiteral("PID %1 · %2").arg(p.pid).arg(p.path);
                 emitEvent(ev);
             }
-            // 回收已退出的 PID，避免集合无限膨胀
+            // 回收已退出的 PID。不能在遍历 QSet 时 remove，迭代器会失效。
+            QSet<quint32> still;
             for (const quint32 pid : d->reportedPids) {
-                if (!alive.contains(pid)) d->reportedPids.remove(pid);
+                if (alive.contains(pid)) still.insert(pid);
             }
+            d->reportedPids = still;
         }
 
         // ---- 2. 到点重新扫描并做差集 ----

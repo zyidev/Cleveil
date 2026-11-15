@@ -29,8 +29,8 @@ bool ForceUninstaller::removeRegistration(const InstalledApp &app,
         return false;
     }
 
-    // 先备份：.reg 文件用户双击即可还原
-    if (!backupDir.isEmpty() && backupFile) {
+    // 调用方要求备份时，导出失败就保留登记项
+    if (!backupDir.isEmpty()) {
         QDir().mkpath(backupDir);
         const QString safeName = QStringLiteral("%1_%2.reg")
                                      .arg(app.name, QDateTime::currentDateTime()
@@ -40,8 +40,15 @@ bool ForceUninstaller::removeRegistration(const InstalledApp &app,
                         QStringLiteral("_"));
         const QString file = QDir(backupDir).filePath(cleaned);
         QString backupError;
-        if (backupRegistryKey(app.registryPath, file, &backupError))
-            *backupFile = file;
+        if (!backupRegistryKey(app.registryPath, file, &backupError)) {
+            if (error) {
+                *error = backupError.isEmpty()
+                             ? QStringLiteral("注册表备份失败，已取消删除")
+                             : backupError;
+            }
+            return false;
+        }
+        if (backupFile) *backupFile = file;
     }
 
     return deleteRegistryKey(app.registryPath, app.is64View, error);

@@ -16,7 +16,6 @@
 
 #include <QApplication>
 #include <QCheckBox>
-#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QHBoxLayout>
@@ -187,7 +186,7 @@ void BatchWizard::buildOptionPage()
     QLabel *note = new QLabel(
         QStringLiteral("<b>说明</b><br>"
                        "· 静默卸载不会显示安装器界面，部分程序不支持，会自动退回常规卸载；<br>"
-                       "· 自动清理只删除“默认勾选”的残留项，标记为“疑似”的项会保留，供你事后手动确认；<br>"
+                       "· 自动清理只删除路径已经对上该程序的项（安装目录、启动项、服务、计划任务）；只是同名或同厂商的项会留下来；<br>"
                        "· 注册表删除前会自动导出 .reg 备份，文件删除走回收站。"), page);
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral("color:#6b7280;"));
@@ -241,6 +240,7 @@ void BatchWizard::initializePage(int id)
     if (id == PageProgress) {
         // 进入执行页：把按钮改成"停止/完成"，并开始跑队列
         button(QWizard::BackButton)->setEnabled(false);
+        button(QWizard::FinishButton)->setEnabled(false);
         if (QPushButton *cancel = qobject_cast<QPushButton *>(button(QWizard::CancelButton))) {
             cancel->setText(QStringLiteral("停止"));
             disconnect(cancel, nullptr, this, nullptr);
@@ -248,11 +248,19 @@ void BatchWizard::initializePage(int id)
         }
         startExecution();
     } else if (id == PageOptions) {
-        m_optPreferSilent  = m_chkSilent->isChecked();
-        m_optConfirmEach   = m_chkConfirm->isChecked();
-        m_optCleanLeftover = m_chkLeftover->isChecked();
+        // 选项要等用户离开本页再读。这里只锁定已勾选的程序。
         m_queue = chosenApps();
     }
+}
+
+void BatchWizard::reject()
+{
+    if (m_running) {
+        m_stopRequested = true;
+        logLine(QStringLiteral("已请求停止：当前程序结束后不再继续。"));
+        return;
+    }
+    QWizard::reject();
 }
 
 QVector<InstalledApp> BatchWizard::chosenApps() const
@@ -298,6 +306,13 @@ bool BatchWizard::validateCurrentPage()
 // ---------------------------------------------------------------------------
 void BatchWizard::startExecution()
 {
+    if (m_running) return;
+
+    // 在真正开跑时读取选项。initializePage 发生在页面显示之前，读不到用户随后的修改。
+    if (m_chkSilent) m_optPreferSilent = m_chkSilent->isChecked();
+    if (m_chkConfirm) m_optConfirmEach = m_chkConfirm->isChecked();
+    if (m_chkLeftover) m_optCleanLeftover = m_chkLeftover->isChecked();
+
     if (m_queue.isEmpty()) m_queue = chosenApps();
 
     m_index = m_ok = m_fail = m_skip = 0;
@@ -400,18 +415,18 @@ void BatchWizard::onRunnerFinished(bool started, quint32 exitCode, const QString
             // ---- 卸载成功后自动清理残留 ----
             if (m_optCleanLeftover) {
                 logLine(QStringLiteral("      正在扫描 %1 的残留…").arg(app.name));
-                const QVector<LeftoverItem> items = LeftoverScanner::scan(
-                    app, [this, &app](const QString &stage, int percent) {
-                        setCurrentStep(QStringLiteral("扫描 %1 的残留：%2（%3%）")
-                                           .arg(app.name, stage).arg(percent));
-                        QCoreApplication::processEvents();
-                    });
+                setCurrentStep(QStringLiteral("正在扫描 %1 的残留…").arg(app.name));
+                // 扫描在界面线程进行。这里不能 processEvents，否则用户点“完成”会把向导拆掉。
+                const QVector<LeftoverItem> items = LeftoverScanner::scan(app);
 
                 QVector<LeftoverItem> toRemove;
                 for (const LeftoverItem &item : items) {
-                    // 只自动清理默认勾选、且没有被标记为"疑似"的项，避免误删用户数据
-                    if (item.checked && !item.note.contains(QStringLiteral("疑似")))
-                        toRemove.append(item);
+                    // 只自动清理“路径已经对上”的项。同名/同厂商的项留给用户在残留窗口里确认。
+                    if (item.match != LeftoverMatch::PathBound) continue;
+                    if ((item.kind == LeftoverKind::Folder || item.kind == LeftoverKind::File)
+                        && isDangerousPath(item.detail))
+                        continue;
+                    toRemove.append(item);
                 }
 
                 if (toRemove.isEmpty()) {

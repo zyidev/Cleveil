@@ -63,6 +63,79 @@ QString winErr(const QString &what)
     return QStringLiteral("%1（错误码 %2）").arg(what).arg(code);
 }
 
+// 去掉 \\?\ 前缀，再用 GetFullPathName 消掉 . / ..，最后统一成正斜杠。
+// 保留原始大小写；比较时由调用方转小写。
+QString normalizedPath(const QString &input)
+{
+    QString p = input.trimmed();
+    if (p.isEmpty()) return {};
+
+    if (p.startsWith(QLatin1String("\\\\?\\UNC\\"), Qt::CaseInsensitive))
+        p = QLatin1String("\\\\") + p.mid(8);
+    else if (p.startsWith(QLatin1String("\\\\?\\")) || p.startsWith(QLatin1String("\\??\\")))
+        p = p.mid(4);
+
+    const std::wstring src = p.toStdWString();
+    const DWORD need = GetFullPathNameW(src.c_str(), 0, nullptr, nullptr);
+    if (need > 0 && need < 32768) {
+        std::wstring buf(need, L'\0');
+        const DWORD got = GetFullPathNameW(src.c_str(), need, buf.data(), nullptr);
+        if (got > 0 && got < need)
+            p = QString::fromWCharArray(buf.data(), static_cast<int>(got));
+    }
+
+    p = QDir::cleanPath(QDir::fromNativeSeparators(p));
+    // 盘符根 "C:/" 长度为 3，保留斜杠；更深的路径去掉末尾斜杠，方便做前缀比较
+    if (p.size() > 3 && p.endsWith(QLatin1Char('/')))
+        p.chop(1);
+    return p;
+}
+
+bool pathEquals(const QString &path, const QString &root)
+{
+    return path.compare(root, Qt::CaseInsensitive) == 0;
+}
+
+bool pathEqualsOrUnder(const QString &path, const QString &root)
+{
+    if (pathEquals(path, root)) return true;
+    return path.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive);
+}
+
+// 注册表删除的最后一道闸：拒绝盘符级的系统键，以及 Uninstall 键本身。
+// App Paths\某个.exe、Uninstall\{GUID} 这种更深的子键仍然允许删。
+bool isProtectedRegistrySubpath(const QString &subPath)
+{
+    QString n = subPath;
+    n.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    while (n.startsWith(QLatin1Char('\\'))) n.remove(0, 1);
+    while (n.endsWith(QLatin1Char('\\'))) n.chop(1);
+    n = n.toLower();
+    if (n.isEmpty()) return true;
+
+    static const QStringList blocked = {
+        QStringLiteral("software"),
+        QStringLiteral("software\\microsoft"),
+        QStringLiteral("software\\microsoft\\windows"),
+        QStringLiteral("software\\microsoft\\windows\\currentversion"),
+        QStringLiteral("software\\microsoft\\windows\\currentversion\\uninstall"),
+        QStringLiteral("software\\microsoft\\windows nt"),
+        QStringLiteral("software\\microsoft\\windows nt\\currentversion"),
+        QStringLiteral("software\\wow6432node"),
+        QStringLiteral("software\\wow6432node\\microsoft"),
+        QStringLiteral("software\\wow6432node\\microsoft\\windows"),
+        QStringLiteral("software\\wow6432node\\microsoft\\windows\\currentversion"),
+        QStringLiteral("software\\wow6432node\\microsoft\\windows\\currentversion\\uninstall"),
+        QStringLiteral("software\\classes"),
+        QStringLiteral("software\\policies"),
+    };
+    if (blocked.contains(n)) return true;
+    if (n == QLatin1String("system") || n.startsWith(QLatin1String("system\\"))) return true;
+    if (n == QLatin1String("sam") || n.startsWith(QLatin1String("sam\\"))) return true;
+    if (n == QLatin1String("security") || n.startsWith(QLatin1String("security\\"))) return true;
+    return false;
+}
+
 } // namespace
 
 // ===========================================================================
@@ -138,61 +211,137 @@ QString splitIconSpec(const QString &spec, int *index)
 
 bool isPathUnder(const QString &child, const QString &parent)
 {
-    if (child.isEmpty() || parent.isEmpty()) return false;
-
-    // 注意：QDir::cleanPath 会把分隔符统一成 '/'，所以比较也必须用 '/'
-    // （早期版本这里拼的是 '\\'，导致 Windows 路径永远匹配不上，父/子目录判重失效）
-    QString c = QDir::cleanPath(QDir::fromNativeSeparators(child)).toLower();
-    QString p = QDir::cleanPath(QDir::fromNativeSeparators(parent)).toLower();
+    const QString c = normalizedPath(child);
+    QString p = normalizedPath(parent);
     if (c.isEmpty() || p.isEmpty()) return false;
 
     if (!p.endsWith(QLatin1Char('/'))) p += QLatin1Char('/');
-    // 目录本身也算"在其之下"
-    if (c + QLatin1Char('/') == p) return true;
+    // 目录本身也算在其下。比较前补斜杠，避免 "C:/App" 命中 "C:/App2"。
+    if (QString(c + QLatin1Char('/')).compare(p, Qt::CaseInsensitive) == 0) return true;
     return c.startsWith(p, Qt::CaseInsensitive);
 }
 
 bool isDangerousPath(const QString &path)
 {
-    const QString raw = QDir::cleanPath(QDir::toNativeSeparators(path));
-    if (raw.isEmpty()) return true;
+    const QString full = normalizedPath(path);
+    if (full.isEmpty()) return true;
 
-    const QString lower = raw.toLower();
+    const QString lower = full.toLower();
+    const bool unc = lower.startsWith(QLatin1String("//"));
+    const QStringList parts = lower.split(QLatin1Char('/'), Qt::SkipEmptyParts);
 
-    // "C:" 这种盘符根（注意 cleanPath 会把 "C:\" 变成 "C:/" 或 "C:\"）
-    if (lower.size() <= 2 && lower.endsWith(QLatin1Char(':'))) return true;
-    if (lower == QStringLiteral("c:\\") || lower == QStringLiteral("c:/")) return true;
-
-    // 路径层级太少（只有盘符或只有一层目录）一律视为危险
-    const QStringList parts = lower.split(QRegularExpression(QStringLiteral("[\\\\/]")),
-                                          Qt::SkipEmptyParts);
-    if (parts.size() < 2) return true;
-
-    static const QStringList protectedDirs = {
-        QStringLiteral("c:\\windows"),
-        QStringLiteral("c:\\program files"),
-        QStringLiteral("c:\\program files (x86)"),
-        QStringLiteral("c:\\programdata"),
-        QStringLiteral("c:\\users"),
-        QStringLiteral("c:\\$recycle.bin"),
-        QStringLiteral("c:\\system volume information"),
-        QStringLiteral("c:\\recovery"),
-        QStringLiteral("c:\\perflogs"),
-        QStringLiteral("c:\\documents and settings"),
-        QStringLiteral("c:\\boot")
-    };
-
-    const QString plain = lower;
-    for (const QString &d : protectedDirs) {
-        if (plain == d || plain == d + QLatin1Char('\\')) return true;
+    // 盘符根、UNC 共享根本身一律拒绝。子目录（C:/Program Files/某程序）放行。
+    if (unc) {
+        if (parts.size() < 3) return true;
+    } else {
+        if (parts.size() < 2) return true;
     }
 
-    // 用户主目录本身不能删
-    const QString home = QDir::cleanPath(
-        QDir::toNativeSeparators(QStandardPaths::writableLocation(QStandardPaths::HomeLocation))).toLower();
-    if (!home.isEmpty() && (plain == home || plain == home + QLatin1Char('\\'))) return true;
+    if (!unc && parts.at(0).size() == 2 && parts.at(0).endsWith(QLatin1Char(':'))) {
+        const QString drive = parts.at(0);          // "c:"
+        const QString top = parts.at(1);
+
+        // 这些目录连同其全部子路径都不能删（Windows\System32 也在其中）
+        const QStringList treeRoots = {
+            QStringLiteral("windows"),
+            QStringLiteral("$recycle.bin"),
+            QStringLiteral("system volume information"),
+            QStringLiteral("recovery"),
+            QStringLiteral("perflogs"),
+            QStringLiteral("boot"),
+            QStringLiteral("documents and settings"),
+        };
+        if (treeRoots.contains(top)) return true;
+
+        // 卷上的这几个根目录本身不能删，它们的子目录（具体某个程序）可以
+        const QStringList volumeRoots = {
+            QStringLiteral("program files"),
+            QStringLiteral("program files (x86)"),
+            QStringLiteral("programdata"),
+            QStringLiteral("users"),
+        };
+        if (volumeRoots.contains(top) && parts.size() == 2) return true;
+
+        if ((top == QLatin1String("program files") || top == QLatin1String("program files (x86)"))
+            && parts.size() >= 3)
+        {
+            const QString second = parts.at(2);
+            const QStringList blockedSecond = {
+                QStringLiteral("common files"),
+                QStringLiteral("windowsapps"),
+                QStringLiteral("windows defender"),
+                QStringLiteral("windows nt"),
+                QStringLiteral("internet explorer"),
+                QStringLiteral("modifiablewindowsapps"),
+                QStringLiteral("windows mail"),
+                QStringLiteral("windows photo viewer"),
+                QStringLiteral("windows sidebar"),
+                QStringLiteral("windows security"),
+            };
+            if (blockedSecond.contains(second)) return true;
+        }
+
+        if (top == QLatin1String("programdata") && parts.size() >= 3
+            && parts.at(2) == QLatin1String("microsoft"))
+            return true;
+
+        if (top == QLatin1String("users") && parts.size() >= 3) {
+            const QString user = parts.at(2);
+            const QStringList specialUsers = {
+                QStringLiteral("public"),
+                QStringLiteral("default"),
+                QStringLiteral("default user"),
+                QStringLiteral("all users"),
+            };
+            if (specialUsers.contains(user)) return true;
+        }
+
+        Q_UNUSED(drive)
+    }
+
+    // 实际的 Windows 目录（系统不一定装在 C:）
+    wchar_t winDir[MAX_PATH] = {};
+    const UINT winLen = GetWindowsDirectoryW(winDir, MAX_PATH);
+    if (winLen > 0 && winLen < MAX_PATH) {
+        const QString win = normalizedPath(QString::fromWCharArray(winDir, static_cast<int>(winLen))).toLower();
+        if (!win.isEmpty() && pathEqualsOrUnder(lower, win)) return true;
+    }
+
+    const QString profile = normalizedPath(expandEnv(QStringLiteral("%USERPROFILE%"))).toLower();
+    const QString roaming = normalizedPath(expandEnv(QStringLiteral("%APPDATA%"))).toLower();
+    const QString localApp = normalizedPath(expandEnv(QStringLiteral("%LOCALAPPDATA%"))).toLower();
+    if (!profile.isEmpty() && (pathEquals(lower, profile)
+                               || pathEquals(lower, profile + QStringLiteral("/appdata"))))
+        return true;
+    if (!roaming.isEmpty() && pathEquals(lower, roaming)) return true;
+    if (!localApp.isEmpty() && pathEquals(lower, localApp)) return true;
+    if (!profile.isEmpty() && pathEquals(lower, profile + QStringLiteral("/appdata/locallow")))
+        return true;
 
     return false;
+}
+
+bool isProtectedProcessName(const QString &exeName)
+{
+    const QString n = exeName.trimmed().toLower();
+    static const QStringList names = {
+        QStringLiteral("csrss.exe"),
+        QStringLiteral("lsass.exe"),
+        QStringLiteral("lsaiso.exe"),
+        QStringLiteral("wininit.exe"),
+        QStringLiteral("winlogon.exe"),
+        QStringLiteral("services.exe"),
+        QStringLiteral("smss.exe"),
+        QStringLiteral("svchost.exe"),
+        QStringLiteral("dwm.exe"),
+        QStringLiteral("fontdrvhost.exe"),
+        QStringLiteral("sihost.exe"),
+        QStringLiteral("system"),
+        QStringLiteral("registry"),
+        QStringLiteral("secure system"),
+        QStringLiteral("memory compression"),
+    };
+    return names.contains(n);
 }
 
 // ===========================================================================
@@ -440,12 +589,19 @@ bool recyclePaths(const QStringList &paths, QString *error)
     // SHFileOperation 要求：绝对路径、路径之间用 \0 分隔、整个列表以 \0\0 结尾
     std::wstring from;
     for (const QString &p : paths) {
-        const QString full = QDir::toNativeSeparators(
-            QDir::cleanPath(QFileInfo(p).absoluteFilePath()));
+        const QString normalized = normalizedPath(p);
+        const QString full = QDir::toNativeSeparators(normalized);
 
         // 最后一道安全防线：危险路径直接拒绝
-        if (isDangerousPath(full)) {
-            if (error) *error = QStringLiteral("已阻止删除受保护的系统路径：%1").arg(full);
+        if (normalized.isEmpty() || isDangerousPath(normalized)) {
+            if (error) *error = QStringLiteral("已阻止删除受保护的系统路径：%1").arg(full.isEmpty() ? p : full);
+            return false;
+        }
+
+        // 目录连接点 / 符号链接的目标可能在系统目录里，删链接有时会波及目标
+        const DWORD attr = GetFileAttributesW(full.toStdWString().c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            if (error) *error = QStringLiteral("已拒绝删除符号链接或目录连接点：%1").arg(full);
             return false;
         }
 
@@ -566,6 +722,10 @@ bool deleteRegistryKey(const QString &fullPath, bool is64View, QString *error)
     QString sub;
     if (!splitRegistryPath(fullPath, &root, &sub) || sub.isEmpty()) {
         if (error) *error = QStringLiteral("注册表路径无法解析：%1").arg(fullPath);
+        return false;
+    }
+    if (isProtectedRegistrySubpath(sub)) {
+        if (error) *error = QStringLiteral("已拒绝删除受保护的注册表项：%1").arg(fullPath);
         return false;
     }
 
@@ -744,6 +904,41 @@ bool killProcess(quint32 pid, QString *error)
     return ok;
 }
 
+bool killProcessIfUnder(quint32 pid, const QString &directory, QString *error)
+{
+    if (pid <= 4 || directory.trimmed().isEmpty() || isDangerousPath(directory)) {
+        if (error) *error = QStringLiteral("已拒绝结束该进程");
+        return false;
+    }
+
+    HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) {
+        if (error) *error = winErr(QStringLiteral("打开进程失败（可能权限不足）"));
+        return false;
+    }
+
+    wchar_t buf[32768] = {};
+    DWORD len = static_cast<DWORD>(sizeof(buf) / sizeof(buf[0]));
+    if (!QueryFullProcessImageNameW(h, 0, buf, &len) || len == 0) {
+        CloseHandle(h);
+        if (error) *error = QStringLiteral("无法确认进程路径，已拒绝结束");
+        return false;
+    }
+
+    const QString image = QString::fromWCharArray(buf, static_cast<int>(len));
+    const QString name = QFileInfo(image).fileName();
+    if (isProtectedProcessName(name) || isDangerousPath(image) || !isPathUnder(image, directory)) {
+        CloseHandle(h);
+        if (error) *error = QStringLiteral("已拒绝结束系统进程或不在安装目录内的进程");
+        return false;
+    }
+
+    const bool ok = TerminateProcess(h, 1) != 0;
+    if (!ok && error) *error = winErr(QStringLiteral("终止进程失败"));
+    CloseHandle(h);
+    return ok;
+}
+
 QVector<ServiceRef> enumerateServices()
 {
     QVector<ServiceRef> result;
@@ -799,6 +994,22 @@ QVector<ServiceRef> enumerateServices()
 
 bool deleteService(const QString &serviceName, QString *error)
 {
+    static const QStringList protectedServices = {
+        QStringLiteral("WinDefend"), QStringLiteral("WdNisSvc"), QStringLiteral("Sense"),
+        QStringLiteral("SecurityHealthService"), QStringLiteral("wuauserv"),
+        QStringLiteral("UsoSvc"), QStringLiteral("EventLog"), QStringLiteral("RpcSs"),
+        QStringLiteral("Schedule"), QStringLiteral("SamSs"), QStringLiteral("CryptSvc"),
+        QStringLiteral("Winmgmt"), QStringLiteral("Dhcp"), QStringLiteral("Dnscache"),
+        QStringLiteral("BFE"), QStringLiteral("mpssvc"), QStringLiteral("wscsvc"),
+        QStringLiteral("DcomLaunch"), QStringLiteral("LSM"), QStringLiteral("Power"),
+        QStringLiteral("ProfSvc"), QStringLiteral("Themes"), QStringLiteral("AudioSrv"),
+        QStringLiteral("BrokerInfrastructure"), QStringLiteral("SystemEventsBroker"),
+    };
+    if (protectedServices.contains(serviceName, Qt::CaseInsensitive)) {
+        if (error) *error = QStringLiteral("已拒绝删除系统服务：%1").arg(serviceName);
+        return false;
+    }
+
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!scm) {
         if (error) *error = winErr(QStringLiteral("无法连接服务管理器（需要管理员权限）"));

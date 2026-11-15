@@ -51,6 +51,7 @@ signals:
 protected:
     void initializePage(int id) override;
     bool validateCurrentPage() override;
+    void reject() override;
 
 private slots:
     void onRunnerFinished(bool started, quint32 exitCode, const QString &error);

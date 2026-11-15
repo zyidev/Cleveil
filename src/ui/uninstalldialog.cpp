@@ -113,6 +113,13 @@ void UninstallDialog::onRunnerFinished(bool started, quint32 exitCode, const QSt
 {
     if (m_index >= m_tasks.size()) return;
 
+    if (m_cancelled) {
+        appendLog(QStringLiteral("已停止，剩余任务不再执行"));
+        m_index = m_tasks.size();
+        startNext();
+        return;
+    }
+
     const UninstallTask &task = m_tasks.at(m_index);
 
     if (!started) {
@@ -144,15 +151,15 @@ void UninstallDialog::onRunnerFinished(bool started, quint32 exitCode, const QSt
 
 void UninstallDialog::onCancelClicked()
 {
-    if (m_index < m_tasks.size()) {
-        m_cancelled = true;
-        m_runner->terminate();
-        appendLog(QStringLiteral("已请求停止：剩余任务不再执行"));
-        m_index = m_tasks.size();    // 让 startNext 走"结束"分支
-        startNext();
-    } else {
+    if (m_index >= m_tasks.size()) {
         reject();
+        return;
     }
+    if (m_cancelled) return;
+    m_cancelled = true;
+    m_cancelButton->setEnabled(false);
+    appendLog(QStringLiteral("已请求停止：当前项结束后不再继续"));
+    m_runner->terminate();
 }
 
 } // namespace un

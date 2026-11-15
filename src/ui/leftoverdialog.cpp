@@ -15,12 +15,15 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrent>
+
+#include <objbase.h>
 
 namespace un {
 
@@ -39,11 +42,14 @@ LeftoverDialog::LeftoverDialog(const InstalledApp &app, QWidget *parent)
     connect(m_scanWatcher, &QFutureWatcher<QVector<LeftoverItem>>::finished,
             this, &LeftoverDialog::onScanFinished);
 
-    // 进度回调来自工作线程，必须回到 UI 线程再改控件
-    LeftoverScanner::ProgressFn progress = [this](const QString &stage, int percent) {
-        QMetaObject::invokeMethod(this, [this, stage, percent]() {
-            m_status->setText(stage);
-            m_progress->setValue(percent);
+    // 进度回调来自工作线程。窗口关掉之后不能再碰控件。
+    const QPointer<LeftoverDialog> guard(this);
+    LeftoverScanner::ProgressFn progress = [guard](const QString &stage, int percent) {
+        if (!guard) return;
+        QMetaObject::invokeMethod(guard.data(), [guard, stage, percent]() {
+            if (!guard) return;
+            guard->m_status->setText(stage);
+            guard->m_progress->setValue(percent);
         }, Qt::QueuedConnection);
     };
 
@@ -340,7 +346,12 @@ void LeftoverDialog::removeSelected()
     connect(m_removeWatcher, &QFutureWatcher<RemovalResult>::finished,
             this, &LeftoverDialog::onRemovalFinished);
     m_removeWatcher->setFuture(QtConcurrent::run([checked, backupDir]() {
-        return LeftoverRemover::remove(checked, backupDir);
+        // SHFileOperation 必须在初始化过 COM 的线程上调用
+        const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const bool balance = (hr == S_OK || hr == S_FALSE);
+        const RemovalResult result = LeftoverRemover::remove(checked, backupDir);
+        if (balance) CoUninitialize();
+        return result;
     }));
 }
 

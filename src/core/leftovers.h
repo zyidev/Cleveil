@@ -26,6 +26,13 @@ enum class LeftoverKind {
     ScheduledTask    // 计划任务
 };
 
+// 这条残留凭什么被列出来。自动清理（命令行 --apply、批量向导）只删 PathBound。
+enum class LeftoverMatch {
+    PathBound,   // 卸载登记项，或文件/服务/任务的路径确在安装目录内
+    Name,        // 名称与程序名完全相同，未经路径证实
+    Publisher    // 只和发布者同名
+};
+
 // 一条残留记录
 struct LeftoverItem {
     LeftoverKind kind = LeftoverKind::Folder;
@@ -36,8 +43,9 @@ struct LeftoverItem {
     qint64       sizeBytes = -1;        // 目录、文件才有意义
     bool         is64View = true;        // 注册表项用
     bool         requiresAdmin = false;
-    bool         checked = true;        // 默认是否勾选
-    QString      note;                  // 给用户的提示（例如"疑似，默认不清理"）
+    LeftoverMatch match = LeftoverMatch::Name;
+    bool         checked = false;       // 只有 PathBound 默认勾选
+    QString      note;                  // 给用户的提示
 };
 
 // 清理结果汇总

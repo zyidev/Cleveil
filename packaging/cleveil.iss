@@ -1,11 +1,11 @@
 ; ===========================================================================
-;  cleveil.iss —— Cleveil 1.0.0 的 Inno Setup 安装包脚本
+;  cleveil.iss —— Cleveil 1.1.0 的 Inno Setup 安装包脚本
 ; ===========================================================================
 ;  用法（Inno Setup 6 已安装）：
 ;      & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\cleveil.iss
 ;
 ;  前置条件：先由 build.ps1 构建出 build\，再执行下面的"整理分发目录"步骤，
-;  把 build\ 里的 exe + Qt DLL + 插件目录拷到 dist\Cleveil-1.0.0-win64\。
+;  把 build\ 里的 exe + Qt DLL + 插件目录拷到 dist\Cleveil-1.1.0-win64\。
 ;  打包时把 README、LICENSE 一并带进入口目录，安装后用户可直接查看。
 ;
 ;  设计取舍：
@@ -16,7 +16,7 @@
 ; ===========================================================================
 
 #define MyAppName "Cleveil"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "zyidev"
 #define MyAppURL "https://github.com/zyidev/Cleveil"
 #define MyAppExeName "Cleveil.exe"
@@ -34,12 +34,13 @@ AppUpdatesURL={#MyAppURL}/releases
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription={#MyAppName} Setup
-DefaultDirName={autopf}\{#MyAppName}
+; lowest 不能写 Program Files。装到当前用户的 LocalAppData，不弹安装器 UAC。
+DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
 OutputDir=..\dist
-OutputBaseFilename=Cleveil-1.0.0-win64-setup
+OutputBaseFilename=Cleveil-1.1.0-win64-setup
 SetupIconFile=..\resources\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
@@ -58,7 +59,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 ; 整个分发目录，含 Qt6*.dll 与 generic/iconengines/imageformats/networkinformation/platforms/styles/tls
-Source: "..\dist\Cleveil-1.0.0-win64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\Cleveil-1.1.0-win64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

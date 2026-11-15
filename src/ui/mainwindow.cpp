@@ -982,7 +982,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("关于 Cleveil"),
         QStringLiteral(
-            "<h3>Cleveil 1.0</h3>"
+            "<h3>Cleveil 1.1</h3>"
             "<p>Windows 程序卸载与残留清理工具。</p>"
             "<p><b>功能</b><br>"
             "· 扫描注册表 Uninstall 键，列出全部已安装程序（含 32/64 位视图）<br>"

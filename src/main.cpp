@@ -33,7 +33,7 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("Cleveil"));
     QApplication::setOrganizationDomain(QStringLiteral("cleveil.local"));
     QApplication::setApplicationName(QStringLiteral("Cleveil"));
-    QApplication::setApplicationVersion(QStringLiteral("1.0.0"));
+    QApplication::setApplicationVersion(QStringLiteral("1.1.0"));
 
     // 应用图标：/icons/app.png 来自 resources/resources.qrc（编译进 exe）
     // 这样即使 exe 被改名、或从别处启动，窗口与任务栏图标依然是 Cleveil 的图
@@ -259,13 +259,15 @@ int main(int argc, char *argv[])
             return 0;
         }
 
-        // 和界面一致的规则：弱匹配（note 里带"疑似"）不自动删；
-        // 另外 detail 为空的条目（例如没填 registryPath 时生成的"卸载登记项"占位）一律跳过，
-        // 否则会拿空键路径去删注册表，白报一个失败。
+        // 只删除路径已经对上的项（LeftoverMatch::PathBound）。
+        // 同名或同厂商的项默认不勾，这里也不删。危险路径再挡一次。
         QVector<un::LeftoverItem> targets;
         for (const un::LeftoverItem &it : items) {
             if (it.detail.trimmed().isEmpty()) continue;
-            if (it.note.contains(QStringLiteral("疑似"))) continue;
+            if (it.match != un::LeftoverMatch::PathBound) continue;
+            if ((it.kind == un::LeftoverKind::Folder || it.kind == un::LeftoverKind::File)
+                && un::isDangerousPath(it.detail))
+                continue;
             targets.append(it);
         }
         // AppLocalDataLocation 已经是 %LOCALAPPDATA%\Cleveil\Cleveil，和界面里的备份根一致
