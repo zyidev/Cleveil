@@ -3,15 +3,21 @@
 // ============================================================================
 
 #include "core/uninstaller.h"
+#include "core/inventory/whitelist.h"
 #include "core/winutil.h"
 
 #include <QDir>
+#include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>   // 从卸载命令里抓产品码 GUID
 #include <QTimer>
 
 #include <shellapi.h>      // ShellExecuteExW / SEE_MASK_*
+#include <winsvc.h>
 #include <string>
+
+#include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Management.Deployment.h>
 
 namespace un {
 
@@ -96,6 +102,79 @@ bool msiProductInstalled(const QString &productCode)
     return state == 5 || state == 3;
 }
 
+namespace {
+
+bool appxPackagePresent(const QString &fullName)
+{
+    try {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    } catch (...) {
+        // 进程已经是 STA（OleInitialize）时再要 MTA 会失败，沿用当前公寓即可
+    }
+    try {
+        winrt::Windows::Management::Deployment::PackageManager pm;
+        auto pkg = pm.FindPackageForUser(L"", fullName.toStdWString());
+        if (!pkg) return false;
+        return !std::wstring(pkg.Id().FullName()).empty();
+    } catch (const winrt::hresult_error &ex) {
+        const HRESULT hr = static_cast<HRESULT>(ex.code());
+        // 0x80073CF1 = 包未安装；0x80070490 = 找不到元素
+        if (hr == static_cast<HRESULT>(0x80073CF1) || hr == static_cast<HRESULT>(0x80070490))
+            return false;
+        return true;
+    } catch (...) {
+        return true;
+    }
+}
+
+bool serviceStillExists(const QString &serviceName)
+{
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return true;
+    SC_HANDLE svc = OpenServiceW(scm, serviceName.toStdWString().c_str(), SERVICE_QUERY_STATUS);
+    if (svc) {
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        return true;
+    }
+    const DWORD err = GetLastError();
+    CloseServiceHandle(scm);
+    return err != ERROR_SERVICE_DOES_NOT_EXIST;
+}
+
+bool oemInfStillPresent(const QString &infFileName)
+{
+    const QString name = QFileInfo(infFileName).fileName();
+    if (name.isEmpty()) return true;
+    wchar_t winDir[MAX_PATH] = {};
+    if (GetWindowsDirectoryW(winDir, MAX_PATH) == 0) return true;
+    const QString path = QDir::toNativeSeparators(
+        QString::fromWCharArray(winDir) + QStringLiteral("\\INF\\") + name);
+    return QFileInfo::exists(path);
+}
+
+} // namespace
+
+bool appStillInstalled(const InstalledApp &app)
+{
+    if (app.type == PackageType::Msi) {
+        if (!app.productCode.trimmed().isEmpty())
+            return msiProductInstalled(app.productCode);
+        if (!app.registryPath.isEmpty())
+            return registryKeyExists(app.registryPath, app.is64View);
+        return true;
+    }
+    if (app.type == PackageType::Store)
+        return app.productCode.trimmed().isEmpty() || appxPackagePresent(app.productCode);
+    if (app.type == PackageType::Driver)
+        return app.productCode.trimmed().isEmpty() || oemInfStillPresent(app.productCode);
+    if (app.type == PackageType::Service)
+        return app.productCode.trimmed().isEmpty() || serviceStillExists(app.productCode);
+    if (!app.registryPath.isEmpty())
+        return registryKeyExists(app.registryPath, app.is64View);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // 卸载计划拼装
 // ---------------------------------------------------------------------------
@@ -104,6 +183,33 @@ UninstallPlan Uninstaller::buildPlan(const InstalledApp &app, bool silent)
     UninstallPlan plan;
     plan.silent     = silent;
     plan.needsAdmin = likelyNeedsAdmin(app);
+
+    if (app.type == PackageType::Driver) {
+        if (app.whitelistBlocked || app.heuristic) {
+            plan.reason = QStringLiteral("该驱动包在白名单内，已拒绝卸载。");
+            return plan;
+        }
+        QString why;
+        if (!driverInfRemovable(app.productCode, &why)) {
+            plan.reason = why;
+            return plan;
+        }
+        wchar_t sysDir[MAX_PATH] = {};
+        if (GetSystemDirectoryW(sysDir, MAX_PATH) == 0) {
+            plan.reason = QStringLiteral("无法定位 pnputil.exe");
+            return plan;
+        }
+        plan.program = QDir::toNativeSeparators(
+            QString::fromWCharArray(sysDir) + QStringLiteral("\\pnputil.exe"));
+        plan.arguments << QStringLiteral("/delete-driver")
+                       << QFileInfo(app.productCode).fileName()
+                       << QStringLiteral("/uninstall");
+        plan.needsAdmin = true;
+        plan.silent = true;
+        plan.valid = true;
+        plan.displayCommand = joinCommand(plan.program, plan.arguments);
+        return plan;
+    }
 
     const QString normalCmd = app.uninstallString.trimmed();
     const QString quietCmd  = app.quietUninstallString.trimmed();
@@ -288,9 +394,10 @@ void UninstallRunner::startElevated(const UninstallPlan &plan)
 
     m_processHandle = sei.hProcess;
     if (!m_processHandle) {
-        // 有些系统会把进程直接接管，拿不到句柄，只能认为已成功交出
+        // 拿不到句柄就不能等它结束。报成功会让界面立刻把“还在列表里”判成已卸载。
         m_finished = true;
-        emit finished(true, 0, QString());
+        emit finished(false, 0,
+                      QStringLiteral("卸载程序已提交，但系统没有返回进程句柄，无法确认是否结束"));
         return;
     }
 
@@ -301,6 +408,17 @@ void UninstallRunner::pollElevatedProcess()
 {
     if (!m_processHandle || m_finished) return;
 
+    // 259 既是 STILL_ACTIVE，也可能是进程真实退出码。必须先等句柄，再读退出码。
+    const DWORD wait = WaitForSingleObject(reinterpret_cast<HANDLE>(m_processHandle), 0);
+    if (wait == WAIT_TIMEOUT) return;
+    if (wait != WAIT_OBJECT_0) {
+        m_timer->stop();
+        m_finished = true;
+        cleanup();
+        emit finished(false, 0, QStringLiteral("无法获取卸载进程状态"));
+        return;
+    }
+
     DWORD code = 0;
     if (!GetExitCodeProcess(reinterpret_cast<HANDLE>(m_processHandle), &code)) {
         m_timer->stop();
@@ -309,8 +427,6 @@ void UninstallRunner::pollElevatedProcess()
         emit finished(false, 0, QStringLiteral("无法获取卸载进程状态"));
         return;
     }
-
-    if (code == STILL_ACTIVE) return;   // 还在跑，下次再看
 
     m_timer->stop();
     m_finished = true;

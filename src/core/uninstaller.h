@@ -27,6 +27,11 @@ namespace un {
 // 返回 true 表示 MsiQueryProductState == INSTALLSTATE_DEFAULT(5) 或 LOCAL(3)。
 bool msiProductInstalled(const QString &productCode);
 
+// 卸载后的复核：MSI 看产品码，商店包看 AppX，驱动看 INF 是否还在，
+// 服务看 SCM，其余看登记项。没有可核对的记录时返回 true（仍视为还在），
+// 避免“键是空的”被当成已经卸载成功。
+bool appStillInstalled(const InstalledApp &app);
+
 // 一条准备好执行的卸载命令
 struct UninstallPlan {
     QString     program;          // 可执行文件（如 C:\…\uninst.exe 或 msiexec.exe）

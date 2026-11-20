@@ -57,6 +57,7 @@ public:
     void setPublisherFilter(const QString &mode); // "全部" / "微软" / "第三方"
     void setShowSystemComponents(bool show);
     void setShowUpdates(bool show);
+    void setShowHeuristic(bool show);
 
 protected:
     bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override;
@@ -67,6 +68,7 @@ private:
     QString m_publisherMode = QStringLiteral("全部");
     bool    m_showSystemComponents = false;
     bool    m_showUpdates = false;
+    bool    m_showHeuristic = false;
 };
 
 } // namespace un

@@ -17,17 +17,23 @@ namespace un {
 enum class PackageType {
     Msi,      // Windows Installer：注册表项名通常是 {GUID}，用 msiexec /X{GUID}
     Exe,      // 程序自带卸载器：uninst.exe / unins000.exe / Uninstall.exe …
-    Store,    // Microsoft Store / MSIX 包（走 winget 或 explorer shell）
+    Store,    // Microsoft Store / MSIX 包
+    Driver,   // OEM 驱动包（SetupAPI / DriverStore）
+    Service,  // 未挂到其它软件上的 Windows 服务
+    Portable, // 启发式识别的绿色/便携软件（默认不可批量删除）
     Unknown   // 判定不出来（例如只有一条裸命令行）
 };
 
 inline QString packageTypeText(PackageType type)
 {
     switch (type) {
-    case PackageType::Msi:   return QStringLiteral("MSI");
-    case PackageType::Exe:   return QStringLiteral("EXE");
-    case PackageType::Store: return QStringLiteral("Store");
-    default:                 return QStringLiteral("未知");
+    case PackageType::Msi:      return QStringLiteral("MSI");
+    case PackageType::Exe:      return QStringLiteral("EXE");
+    case PackageType::Store:    return QStringLiteral("Store");
+    case PackageType::Driver:   return QStringLiteral("驱动");
+    case PackageType::Service:  return QStringLiteral("服务");
+    case PackageType::Portable: return QStringLiteral("便携");
+    default:                    return QStringLiteral("未知");
     }
 }
 
@@ -53,9 +59,19 @@ struct InstalledApp {
     bool        systemComponent = false; // SystemComponent=1：微软隐藏项
     bool        isUpdate = false;      // 补丁 / 更新包（ReleaseType、ParentKeyName）
 
+    // 多源枚举：来源标签（ARP/MSI/AppX/…），启发式单独标识
+    QStringList sources;
+    bool        heuristic = false;         // true = 非权威，默认不批量删除
+    bool        whitelistBlocked = false;  // 命中系统共享组件白名单
+    QString     inventoryNote;             // 给界面的补充说明（来源/白名单原因）
+
     // 是否有可用的卸载命令。没有的话只能走"强制卸载"。
     bool canUninstall() const
     {
+        if (whitelistBlocked || heuristic) return false;
+        // 驱动包的删除命令不落在记录上，避免详情里出现可复制的 pnputil 行。
+        if (type == PackageType::Driver)
+            return !productCode.trimmed().isEmpty();
         return !uninstallString.trimmed().isEmpty()
             || !quietUninstallString.trimmed().isEmpty();
     }

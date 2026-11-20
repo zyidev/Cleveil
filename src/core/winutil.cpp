@@ -550,7 +550,10 @@ bool runAsAdminAndWait(const QString &program, const QStringList &args,
         return false;
     }
 
-    if (!sei.hProcess) return true;    // 已交接给系统，无法等待
+    if (!sei.hProcess) {
+        if (error) *error = QStringLiteral("程序已提交，但系统没有返回进程句柄，无法确认是否结束");
+        return false;
+    }
 
     WaitForSingleObject(sei.hProcess, INFINITE);
     DWORD code = 0;

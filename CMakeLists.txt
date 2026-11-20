@@ -9,7 +9,7 @@
 # ============================================================================
 cmake_minimum_required(VERSION 3.21)
 
-project(Cleveil VERSION 1.1.0 LANGUAGES CXX)
+project(Cleveil VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +18,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # AUTORCC：让 .qrc 里的图标自动编译进 exe（Qt 标准工程默认只开 MOC/UIC）
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+find_package(Qt6 6.10 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
 qt_standard_project_setup()
 
 qt_add_executable(Cleveil WIN32
@@ -36,6 +36,20 @@ qt_add_executable(Cleveil WIN32
     src/core/exporter.h         src/core/exporter.cpp
     src/core/installmonitor.h   src/core/installmonitor.cpp   # 实时安装监控
     src/core/signature.h        src/core/signature.cpp        # 数字签名校验
+
+    # ---- 多源枚举（ARP 之外的 MSI / AppX / 驱动 / 服务 / 启发式）----
+    src/core/inventory/types.h
+    src/core/inventory/source.h
+    src/core/inventory/factories.h
+    src/core/inventory/whitelist.h          src/core/inventory/whitelist.cpp
+    src/core/inventory/inventory_service.h  src/core/inventory/inventory_service.cpp
+    src/core/inventory/sources_arp.cpp
+    src/core/inventory/sources_msi.cpp
+    src/core/inventory/sources_appx.cpp
+    src/core/inventory/sources_driver.cpp
+    src/core/inventory/sources_service.cpp
+    src/core/inventory/sources_installer.cpp
+    src/core/inventory/sources_heuristic.cpp
 
     # ---- 界面层 ----
     src/ui/appmodel.h           src/ui/appmodel.cpp
@@ -67,6 +81,9 @@ target_link_libraries(Cleveil PRIVATE
     comctl32    # 通知提示条任务栏集成
     crypt32     # 证书/签名数据解析（CryptQueryObject）
     wintrust    # WinVerifyTrust 验签
+    msi         # MsiEnumProductsEx / MsiGetProductInfoEx（禁止 Win32_Product）
+    setupapi    # OEM 驱动包 INF / DriverStore
+    WindowsApp  # AppX PackageManager（WinRT）
 )
 
 if (MSVC)

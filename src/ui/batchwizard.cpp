@@ -389,7 +389,8 @@ void BatchWizard::runNextApp()
     logLine(QStringLiteral("  → %1：执行 %2").arg(app.name, plan.displayCommand));
 
     // 静默 + 需要管理员时主动走 UAC 通道，其余交给安装器自己弹
-    const bool elevate = plan.silent && plan.needsAdmin;
+    // 驱动包的 pnputil 不会自己弹 UAC，需要管理员时直接提权。
+    const bool elevate = plan.needsAdmin && (app.type == PackageType::Driver || plan.silent);
     m_runner->run(plan, elevate);
 }
 
@@ -404,9 +405,7 @@ void BatchWizard::onRunnerFinished(bool started, quint32 exitCode, const QString
     } else {
         // 复核：以"产品是否还装着"为准。MSI 优先查产品码状态——升级遗留的
         // 僵尸登记项会让"键还在不在"永远为真，从而把成功误判成失败。
-        const bool stillThere = (app.type == PackageType::Msi && !app.productCode.isEmpty())
-                                    ? msiProductInstalled(app.productCode)
-                                    : registryKeyExists(app.registryPath, app.is64View);
+        const bool stillThere = appStillInstalled(app);
         if (!stillThere) {
             ++m_ok;
             m_succeeded << app.name;

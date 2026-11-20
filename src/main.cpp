@@ -3,11 +3,12 @@
 // ============================================================================
 
 #include "core/exporter.h"
+#include "core/inventory/inventory_service.h"
 #include "core/leftovers.h"
-#include "core/registryscanner.h"
 #include "core/uninstaller.h"
 #include "core/winutil.h"      // 顺带引入 <windows.h>
 #include "ui/mainwindow.h"
+#include "ui/settingsdialog.h"
 
 #include <QApplication>
 #include <QDateTime>
@@ -33,7 +34,7 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("Cleveil"));
     QApplication::setOrganizationDomain(QStringLiteral("cleveil.local"));
     QApplication::setApplicationName(QStringLiteral("Cleveil"));
-    QApplication::setApplicationVersion(QStringLiteral("1.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral("1.2.0"));
 
     // 应用图标：/icons/app.png 来自 resources/resources.qrc（编译进 exe）
     // 这样即使 exe 被改名、或从别处启动，窗口与任务栏图标依然是 Cleveil 的图
@@ -100,7 +101,7 @@ int main(int argc, char *argv[])
 
     // ------------------------------------------------------------------
     // 无界面导出：Cleveil.exe --export-html <路径> / --export-csv <路径>
-    // 给自动化脚本和冒烟测试用：不弹任何窗口，扫一遍注册表直接落盘后退出。
+    // 与主窗口同一套多源扫描（读当前设置）。不弹窗口，落盘后退出。
     // 返回码 0 = 成功，2 = 导出失败（错误原因打印到 stderr）。
     // ------------------------------------------------------------------
     const QStringList args = app.arguments();
@@ -115,8 +116,28 @@ int main(int argc, char *argv[])
             exportPath = args.value(i + 1);
         }
     }
+    auto loadApps = []() {
+        const un::AppSettings settings = un::AppSettings::load();
+        un::InventoryScanOptions opt;
+        opt.arp = true;
+        opt.msi = settings.scanExtraSources;
+        opt.appx = settings.scanExtraSources;
+        opt.driverPackages = settings.scanExtraSources;
+        opt.services = settings.scanExtraSources;
+        opt.installerFiles = settings.scanExtraSources;
+        opt.shortcuts = settings.scanShortcuts;
+        opt.exeVersion = settings.scanExeVersion;
+        opt.snapshotDiff = settings.scanSnapshotDiff;
+        opt.includeHeuristicInSoftware = settings.showHeuristic;
+        const un::InventoryScanResult bundle = un::InventoryService::scan(opt);
+        for (const un::InventorySourceError &err : bundle.errors) {
+            std::fprintf(stderr, "%s\n", qPrintable(QStringLiteral("数据源异常：") + err.message));
+        }
+        return un::InventoryService::projectApps(bundle, settings.showSystemComponents);
+    };
+
     if (!exportKind.isEmpty() && !exportPath.isEmpty()) {
-        const QVector<un::InstalledApp> apps = un::RegistryScanner::scanAll();
+        const QVector<un::InstalledApp> apps = loadApps();
         QString error;
         const bool ok = (exportKind == QStringLiteral("html"))
                             ? un::Exporter::exportHtml(apps, exportPath, &error)
@@ -152,7 +173,7 @@ int main(int argc, char *argv[])
         }
     }
     if (!uninstallMatch.isEmpty()) {
-        const QVector<un::InstalledApp> apps = un::RegistryScanner::scanAll();
+        const QVector<un::InstalledApp> apps = loadApps();
         QVector<un::InstalledApp> hits;
         for (const un::InstalledApp &a : apps) {
             if (a.name.contains(uninstallMatch, Qt::CaseInsensitive)) hits.append(a);
@@ -192,17 +213,16 @@ int main(int argc, char *argv[])
         runner.run(plan, elevateFlag || plan.needsAdmin);
         loop.exec();
 
-        // 卸载器返回码不可信（老 NSIS/InstallShield 删干净了也可能返回 1），
-        // 所以这里和界面里一样：只认"登记项是否消失"，最多等 5 分钟。
+        // 卸载器返回码不可信。和界面一样按安装记录复核，最多等 5 分钟。
         bool gone = false;
         for (int i = 0; i < 120; ++i) {
-            if (!un::registryKeyExists(app.registryPath, app.is64View)) {
+            if (!un::appStillInstalled(app)) {
                 gone = true;
                 break;
             }
             QThread::msleep(2500);
         }
-        std::printf("%s\n", qPrintable(QStringLiteral("退出码=%1  登记项已消失=%2")
+        std::printf("%s\n", qPrintable(QStringLiteral("退出码=%1  安装记录已消失=%2")
                                            .arg(exitCode)
                                            .arg(gone ? QStringLiteral("是") : QStringLiteral("否"))));
         OleUninitialize();

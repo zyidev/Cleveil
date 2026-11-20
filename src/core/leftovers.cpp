@@ -174,27 +174,46 @@ QVector<QPair<QString, QString>> enumValues(HKEY root, const QString &subPath, b
         return result;
     }
 
-    wchar_t nameBuf[512];
-    BYTE dataBuf[2048];
+    std::vector<wchar_t> nameBuf(512);
+    std::vector<BYTE> dataBuf(4096);
     DWORD index = 0;
 
     while (true) {
-        DWORD nameLen = static_cast<DWORD>(sizeof(nameBuf) / sizeof(nameBuf[0]));
-        DWORD dataLen = static_cast<DWORD>(sizeof(dataBuf));
+        DWORD nameLen = static_cast<DWORD>(nameBuf.size());
+        DWORD dataLen = static_cast<DWORD>(dataBuf.size());
         DWORD type = 0;
 
-        const LONG ret = RegEnumValueW(key, index, nameBuf, &nameLen, nullptr,
-                                       &type, dataBuf, &dataLen);
+        const LONG ret = RegEnumValueW(key, index, nameBuf.data(), &nameLen, nullptr,
+                                       &type, dataBuf.data(), &dataLen);
         if (ret == ERROR_NO_MORE_ITEMS) break;
+        if (ret == ERROR_MORE_DATA) {
+            bool grew = false;
+            if (nameBuf.size() < 16384) {
+                nameBuf.resize(nameBuf.size() * 2);
+                grew = true;
+            }
+            if (dataLen > dataBuf.size() && dataLen < 1024 * 1024) {
+                dataBuf.resize(static_cast<size_t>(dataLen) + 2);
+                grew = true;
+            } else if (dataBuf.size() < 1024 * 1024) {
+                dataBuf.resize(dataBuf.size() * 2);
+                grew = true;
+            }
+            if (grew) continue;
+            ++index;
+            continue;
+        }
         if (ret != ERROR_SUCCESS) { ++index; continue; }
 
-        const QString name = QString::fromStdWString(std::wstring(nameBuf, nameLen));
+        const QString name = QString::fromStdWString(std::wstring(nameBuf.data(), nameLen));
         QString data;
         if (type == REG_SZ || type == REG_EXPAND_SZ) {
-            data = QString::fromStdWString(
-                std::wstring(reinterpret_cast<const wchar_t *>(dataBuf),
-                             dataLen / sizeof(wchar_t)));
-            if (!data.isEmpty() && data.back() == QChar(0)) data.chop(1);
+            const auto *chars = reinterpret_cast<const wchar_t *>(dataBuf.data());
+            const size_t charsAvail = dataBuf.size() / sizeof(wchar_t);
+            size_t n = dataLen / sizeof(wchar_t);
+            if (n > charsAvail) n = charsAvail;
+            data = QString::fromWCharArray(chars, static_cast<int>(n));
+            while (!data.isEmpty() && data.back() == QChar(0)) data.chop(1);
         }
         result.push_back({name, data.trimmed()});
         ++index;

@@ -9,6 +9,7 @@
 // ============================================================================
 
 #include "core/installmonitor.h"
+#include "core/inventory/inventory_service.h"
 #include "core/registryscanner.h"
 #include "core/winutil.h"
 
@@ -21,6 +22,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QSet>
+#include <QTimeZone>
 
 #include <atomic>
 #include <thread>
@@ -75,7 +77,32 @@ QDateTime fileTimeToQDateTime(quint64 ft)
     SYSTEMTIME st;
     if (!FileTimeToSystemTime(&f, &st)) return QDateTime::currentDateTime();
     return QDateTime(QDate(st.wYear, st.wMonth, st.wDay),
-                     QTime(st.wHour, st.wMinute, st.wSecond), Qt::UTC).toLocalTime();
+                     QTime(st.wHour, st.wMinute, st.wSecond),
+                     QTimeZone::utc()).toLocalTime();
+}
+
+// ARP 变更通知看不到商店包。每次重扫时把 AppX 并进同一条基线。
+// AppX 枚举失败时保留上一次的商店包，避免一次超时被记成“已卸载”。
+QVector<InstalledApp> scanMonitoredApps(const QVector<InstalledApp> &previous)
+{
+    QVector<InstalledApp> current = RegistryScanner::scanAll();
+    InventoryScanOptions opt;
+    opt.arp = false;
+    opt.msi = false;
+    opt.appx = true;
+    opt.driverPackages = false;
+    opt.services = false;
+    opt.installerFiles = false;
+    const InventoryScanResult appx = InventoryService::scan(opt);
+    if (!appx.errors.isEmpty() && appx.software.isEmpty()) {
+        for (const InstalledApp &a : previous) {
+            if (a.type == PackageType::Store || a.id.startsWith(QStringLiteral("appx:")))
+                current.push_back(a);
+        }
+    } else {
+        current += appx.software;
+    }
+    return current;
 }
 
 } // namespace
@@ -253,7 +280,7 @@ void InstallMonitor::workerLoop()
 
         QVector<InstalledApp> current;
         try {
-            current = RegistryScanner::scanAll();
+            current = scanMonitoredApps(d->baseline);
         } catch (...) {
             QMetaObject::invokeMethod(this, [this]() {
                 emit scanFailed(QStringLiteral("扫描注册表时出现异常"));

@@ -15,17 +15,24 @@ namespace un {
 
 namespace {
 
-// CSV 字段转义：含逗号/引号/换行时用双引号包起来，内部引号翻倍
+// CSV 字段转义。以 = + - @ 或制表符开头的单元格在 Excel 里会被当成公式，先加单引号。
 QString csvEscape(const QString &field)
 {
-    if (field.contains(QLatin1Char(',')) || field.contains(QLatin1Char('"'))
-        || field.contains(QLatin1Char('\n')) || field.contains(QLatin1Char('\r')))
+    QString s = field;
+    if (!s.isEmpty()) {
+        const QChar c = s.at(0);
+        if (c == QLatin1Char('=') || c == QLatin1Char('+') || c == QLatin1Char('-')
+            || c == QLatin1Char('@') || c == QLatin1Char('\t') || c == QLatin1Char('\r'))
+            s.prepend(QLatin1Char('\''));
+    }
+    if (s.contains(QLatin1Char(',')) || s.contains(QLatin1Char('"'))
+        || s.contains(QLatin1Char('\n')) || s.contains(QLatin1Char('\r'))
+        || s != field)
     {
-        QString s = field;
         s.replace(QLatin1String("\""), QLatin1String("\"\""));
         return QStringLiteral("\"%1\"").arg(s);
     }
-    return field;
+    return s;
 }
 
 // HTML 转义

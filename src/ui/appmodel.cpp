@@ -74,22 +74,40 @@ QVariant AppTableModel::data(const QModelIndex &index, int role) const
 
     case Qt::ToolTipRole:
         switch (index.column()) {
-        case Name:      // 名称列经常被列宽截断，悬停时给出完整信息
-            return QStringLiteral("%1\n发布者：%2\n版本：%3\n安装位置：%4")
+        case Name: {    // 名称列经常被列宽截断，悬停时给出完整信息
+            QString tip = QStringLiteral("%1\n发布者：%2\n版本：%3\n安装位置：%4")
                 .arg(app.name,
                      app.publisher.isEmpty() ? QStringLiteral("未知") : app.publisher,
                      app.version.isEmpty() ? QStringLiteral("未知") : app.version,
                      app.installLocation.isEmpty() ? QStringLiteral("未记录")
                                                    : app.installLocation);
-        case Type:      return app.canUninstall()
-                                 ? QStringLiteral("卸载命令：\n%1").arg(app.uninstallString)
-                                 : QStringLiteral("该程序没有登记卸载命令");
+            if (!app.sources.isEmpty())
+                tip += QStringLiteral("\n来源：%1").arg(app.sources.join(QLatin1Char('+')));
+            if (app.heuristic)
+                tip += QStringLiteral("\n（启发式识别，默认不可批量删除）");
+            if (app.whitelistBlocked)
+                tip += QStringLiteral("\n（系统共享组件白名单，禁止卸载）");
+            if (!app.inventoryNote.isEmpty())
+                tip += QStringLiteral("\n%1").arg(app.inventoryNote);
+            return tip;
+        }
+        case Type:
+            if (app.type == PackageType::Driver)
+                return app.canUninstall()
+                           ? QStringLiteral("卸载时调用 pnputil，执行前会再次核对设备类")
+                           : QStringLiteral("该驱动包不允许从这里卸载");
+            return app.canUninstall()
+                       ? QStringLiteral("卸载命令：\n%1").arg(
+                             app.uninstallString.isEmpty() ? app.quietUninstallString
+                                                           : app.uninstallString)
+                       : QStringLiteral("该程序没有登记卸载命令");
         default:        return QVariant();
         }
 
     case Qt::ForegroundRole:
-        // 没有卸载命令的程序用浅灰提示"只能强制卸载"
-        if (!app.canUninstall() && index.column() == Name)
+        // 启发式 / 白名单 / 无卸载命令：浅灰提示
+        if (index.column() == Name
+            && (app.heuristic || app.whitelistBlocked || !app.canUninstall()))
             return QBrush(QColor(0x8a, 0x90, 0x9c));
         return QVariant();
 
@@ -160,6 +178,13 @@ void AppFilterProxy::setShowUpdates(bool show)
     endFilterChange(QSortFilterProxyModel::Direction::Rows);
 }
 
+void AppFilterProxy::setShowHeuristic(bool show)
+{
+    m_showHeuristic = show;
+    beginFilterChange();
+    endFilterChange(QSortFilterProxyModel::Direction::Rows);
+}
+
 bool AppFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const
 {
     Q_UNUSED(sourceParent)
@@ -169,11 +194,7 @@ bool AppFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex &sourcePa
 
     const InstalledApp &app = model->appAt(sourceRow);
 
-    // 系统组件与更新补丁默认隐藏（和"设置-应用"的行为一致）
-    if (app.systemComponent && !m_showSystemComponents) return false;
-    if (app.isUpdate && !m_showUpdates) return false;
-
-    // 发布者筛选
+    // 发布者筛选始终生效
     if (m_publisherMode == QStringLiteral("微软")) {
         if (!app.publisher.contains(QStringLiteral("Microsoft"), Qt::CaseInsensitive))
             return false;
@@ -182,14 +203,28 @@ bool AppFilterProxy::filterAcceptsRow(int sourceRow, const QModelIndex &sourcePa
             return false;
     }
 
-    // 关键词搜索：名称、发布者、版本、安装路径都参与匹配
-    if (m_query.isEmpty()) return true;
-
-    const QStringList fields = {app.name, app.publisher, app.version, app.installLocation};
-    for (const QString &f : fields) {
-        if (f.contains(m_query, Qt::CaseInsensitive)) return true;
+    // 有关键词时按兼容分解后的文本匹配，并放开“系统组件 / 更新 / 启发式”的默认隐藏，
+    // 否则 CSV 里有、列表里被藏起来的项会显示成搜不到。
+    if (!m_query.isEmpty()) {
+        QString needle = m_query.normalized(QString::NormalizationForm_KC).toCaseFolded();
+        needle.remove(QChar(0x200B));
+        needle.remove(QChar(0xFEFF));
+        const QStringList fields = {app.name, app.publisher, app.version, app.installLocation};
+        for (const QString &f : fields) {
+            if (f.normalized(QString::NormalizationForm_KC).toCaseFolded().contains(needle))
+                return true;
+        }
+        for (const QString &k : app.keywords) {
+            if (k.normalized(QString::NormalizationForm_KC).toCaseFolded().contains(needle))
+                return true;
+        }
+        return false;
     }
-    return false;
+
+    if (app.systemComponent && !m_showSystemComponents) return false;
+    if (app.isUpdate && !m_showUpdates) return false;
+    if (app.heuristic && !m_showHeuristic) return false;
+    return true;
 }
 
 bool AppFilterProxy::lessThan(const QModelIndex &left, const QModelIndex &right) const

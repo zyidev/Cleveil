@@ -131,18 +131,14 @@ void UninstallDialog::onRunnerFinished(bool started, quint32 exitCode, const QSt
                       .arg(exitCode));
     }
 
-    // 关键一步：用"登记项是否消失"来判定真实结果
-    const bool stillRegistered = !task.app.registryPath.isEmpty()
-                                 && registryKeyExists(task.app.registryPath, task.app.is64View);
-
-    if (!stillRegistered) {
+    // 与批量向导同一套复核：MSI 看产品码，商店包 / 驱动 / 服务看各自的安装记录。
+    // 没有登记项不能当成“已经卸掉”。
+    if (started && !appStillInstalled(task.app)) {
         ++m_succeededCount;
         m_succeededApps << task.app.name;
-        appendLog(QStringLiteral("✔ 已确认卸载：登记项已删除"));
-    } else {
-        appendLog(QStringLiteral("✖ 仍在应用列表中：%1")
-                      .arg(task.plan.valid ? QStringLiteral("卸载可能未完成或被取消")
-                                           : task.plan.reason));
+        appendLog(QStringLiteral("✔ 已确认卸载：安装记录已消失"));
+    } else if (started) {
+        appendLog(QStringLiteral("✖ 安装记录仍在：卸载可能未完成或被取消"));
     }
 
     ++m_index;

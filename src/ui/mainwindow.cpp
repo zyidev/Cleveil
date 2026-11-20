@@ -6,6 +6,7 @@
 
 #include "core/exporter.h"
 #include "core/iconprovider.h"
+#include "core/inventory/inventory_service.h"
 #include "core/leftovers.h"
 #include "core/registryscanner.h"
 #include "core/remover.h"
@@ -95,6 +96,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_model = new AppTableModel(this);
     m_proxy = new AppFilterProxy(this);
     m_proxy->setSourceModel(m_model);
+    m_proxy->setShowSystemComponents(m_settings.showSystemComponents);
+    m_proxy->setShowUpdates(m_settings.showUpdates);
+    m_proxy->setShowHeuristic(m_settings.showHeuristic);
 
     buildActions();
     buildUi();
@@ -459,12 +463,35 @@ void MainWindow::refresh()
     QGuiApplication::setOverrideCursor(Qt::WaitCursor);
     m_busyBar->setVisible(true);
 
-    QVector<InstalledApp> apps = RegistryScanner::scanAll();
+    // 多源枚举：ARP 逻辑仍由 RegistryScanner 提供，经 InventoryService 合并其它来源。
+    InventoryScanOptions opt;
+    opt.arp = true;
+    opt.msi = m_settings.scanExtraSources;
+    opt.appx = m_settings.scanExtraSources;
+    opt.driverPackages = m_settings.scanExtraSources;
+    opt.services = m_settings.scanExtraSources;
+    opt.installerFiles = m_settings.scanExtraSources;
+    opt.shortcuts = m_settings.scanShortcuts;
+    opt.exeVersion = m_settings.scanExeVersion;
+    opt.snapshotDiff = m_settings.scanSnapshotDiff;
+    opt.includeHeuristicInSoftware = m_settings.showHeuristic;
+
+    const InventoryScanResult bundle = InventoryService::scan(opt);
+    QVector<InstalledApp> apps = InventoryService::projectApps(bundle, m_settings.showSystemComponents);
+
     IconProvider::instance().clear();
     m_model->setApps(std::move(apps));
 
     m_busyBar->setVisible(false);
     QGuiApplication::restoreOverrideCursor();
+
+    if (!bundle.errors.isEmpty()) {
+        QStringList msgs;
+        for (int i = 0; i < bundle.errors.size() && i < 3; ++i)
+            msgs << bundle.errors.at(i).message;
+        statusBar()->showMessage(QStringLiteral("部分数据源异常：%1").arg(msgs.join(QStringLiteral("；"))),
+                                 8000);
+    }
 
     updateStatusBar();
     updateDetailPanel();
@@ -567,7 +594,14 @@ void MainWindow::updateDetailPanel()
     m_valueRegistry->setText(breakablePath(app.registryPath));
     m_valueRegistry->setToolTip(app.registryPath);
 
-    if (app.canUninstall()) {
+    if (app.type == PackageType::Driver) {
+        m_valueCommand->setPlainText(
+            app.canUninstall()
+                ? QStringLiteral("卸载时由程序调用 pnputil 删除该 OEM 驱动包，执行前会再次核对文件名和设备类。这里不提供可复制的删除命令。")
+                : (app.inventoryNote.isEmpty()
+                       ? QStringLiteral("该驱动包不允许从这里卸载。")
+                       : app.inventoryNote));
+    } else if (app.canUninstall()) {
         QString cmd = app.uninstallString;
         if (cmd.isEmpty()) cmd = app.quietUninstallString;
         m_valueCommand->setPlainText(cmd);
@@ -684,22 +718,26 @@ void MainWindow::runUninstall(const QVector<InstalledApp> &apps, bool silent)
     for (const InstalledApp &app : apps) {
         UninstallPlan plan = Uninstaller::buildPlan(app, silent);
         if (!plan.valid) {
-            skipped << app.name;
+            skipped << (plan.reason.isEmpty()
+                            ? app.name
+                            : QStringLiteral("%1（%2）").arg(app.name, plan.reason));
             continue;
         }
 
         UninstallTask task;
         task.app     = app;
         task.plan    = plan;
-        // 只有"静默 + 需要管理员"时才主动提权，普通卸载让安装器自己弹 UAC
-        task.elevate = silent && m_settings.elevateSilent && plan.needsAdmin;
+        // 普通卸载让安装器自己弹 UAC。驱动包的 pnputil 不会弹，需要管理员时这里提权。
+        task.elevate = plan.needsAdmin
+                       && (app.type == PackageType::Driver
+                           || (silent && m_settings.elevateSilent));
         tasks << task;
     }
 
     if (tasks.isEmpty()) {
         QMessageBox::information(
             this, QStringLiteral("无法卸载"),
-            QStringLiteral("所选程序没有可在注册表中找到的卸载命令：\n\n%1\n\n"
+            QStringLiteral("所选项目无法卸载：\n\n%1\n\n"
                            "请改用\"强制卸载\"清理。")
                 .arg(skipped.join(QLatin1Char('\n'))));
         return;
@@ -708,7 +746,7 @@ void MainWindow::runUninstall(const QVector<InstalledApp> &apps, bool silent)
     if (!skipped.isEmpty()) {
         QMessageBox::information(
             this, QStringLiteral("部分程序被跳过"),
-            QStringLiteral("以下程序没有卸载命令，已跳过：\n\n%1\n\n"
+            QStringLiteral("以下项目无法卸载，已跳过：\n\n%1\n\n"
                            "可稍后用\"强制卸载\"处理。")
                 .arg(skipped.join(QLatin1Char('\n'))));
     }
@@ -957,7 +995,8 @@ void MainWindow::editSettings()
 
     m_proxy->setShowSystemComponents(m_settings.showSystemComponents);
     m_proxy->setShowUpdates(m_settings.showUpdates);
-    updateStatusBar();
+    m_proxy->setShowHeuristic(m_settings.showHeuristic);
+    refresh();
 }
 
 void MainWindow::relaunchAsAdmin()
@@ -982,10 +1021,11 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("关于 Cleveil"),
         QStringLiteral(
-            "<h3>Cleveil 1.1</h3>"
+            "<h3>Cleveil 1.2</h3>"
             "<p>Windows 程序卸载与残留清理工具。</p>"
             "<p><b>功能</b><br>"
-            "· 扫描注册表 Uninstall 键，列出全部已安装程序（含 32/64 位视图）<br>"
+            "· 多源枚举：ARP 注册表 + MSI API + AppX + OEM 驱动包 + 服务 + 安装器卸载文件<br>"
+            "· 启发式辅助：快捷方式 / EXE 版本信息 / 目录快照差分（默认关闭，单独标识）<br>"
             "· 正常卸载 / 静默卸载（MSI 走 msiexec /qn，EXE 用 QuietUninstallString）<br>"
             "· <b>批量卸载向导</b>：多选一键排队，逐项执行、进度日志、结果汇总，可随时中止<br>"
             "· <b>实时安装监控</b>：注册表变更通知 + 安装器进程侦测，秒级捕获新装程序<br>"

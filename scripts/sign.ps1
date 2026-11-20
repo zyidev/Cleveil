@@ -25,7 +25,7 @@
 ============================================================================
 #>
 param(
-    [string]$Exe        = "D:\dev-project\Cleveil-1.0.0\build\Cleveil.exe",
+    [string]$Exe        = "",
     [string]$Pfx        = "",
     [string]$Password   = "",
     [string]$Thumbprint = "",
@@ -35,6 +35,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+if ([string]::IsNullOrWhiteSpace($Exe)) {
+    $Exe = Join-Path $Root "build\Cleveil.exe"
+}
 
 # ---------------------------------------------------------------------------
 # 1. 找到 signtool.exe（随 Windows SDK 安装，路径里带版本号，取最新的一份）

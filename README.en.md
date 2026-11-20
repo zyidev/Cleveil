@@ -7,12 +7,9 @@
 ![Qt](https://img.shields.io/badge/Qt-6%20Widgets-41CD52?logo=qt&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-A Windows uninstaller and leftover cleaner: scan installed programs → browse/search/sort → inspect details →
-normal uninstall / silent uninstall / batch uninstall wizard → force uninstall with deep leftover cleanup → live
-install monitor → export lists.
+A Windows uninstaller and leftover cleaner. Installed items come from Windows itself: the registry, MSI, Store packages, OEM driver packages, services, and installer uninstall files. Uninstalling is still handed to each program's own uninstaller (MSI via `msiexec`).
 
-It reads no third-party database — every fact comes from Windows' own registry and file system; uninstalling is
-handed back to the program's own uninstaller (MSI via `msiexec`, EXE via `UninstallString`).
+Current version **1.2.0**. Download `Cleveil-1.2.0-win64-setup.exe` from [Releases](https://github.com/zyidev/Cleveil/releases). It installs into the current user's folder and does not require administrator rights.
 
 
 
@@ -28,14 +25,10 @@ handed back to the program's own uninstaller (MSI via `msiexec`, EXE via `Uninst
 
 ## 1. Features
 
-- **Program scan**: reads all four `Uninstall` branches under `HKLM` / `HKCU` (including `WOW6432Node`); deduplicated by name + version + publisher, machine-wide preferred over per-user, 64-bit view over 32-bit.
-- **List and filtering**: six columns with real icons (three-level fallback), header sorting (date and size sorted numerically), live search over name / publisher / path, publisher filter, optional system components and updates, multi-select.
-- **Details pane**: icon, version, install date, size, package type (MSI / EXE), install path, registry key path and the complete uninstall command (selectable).
-- **Three uninstall modes**: normal (run the registered command, can be queued) / silent (`QuietUninstallString`, MSI gets `/qn /norestart`, programs without a silent switch are reported as unsupported instead of being forced) / force (kill related processes, back up and delete the registration key, then hand over to leftover cleanup).
-- **Batch uninstall wizard**: pick programs → choose strategy (prefer silent / confirm each item / auto-clean leftovers) → execute (progress, timestamped per-item log, summary, stoppable mid-run).
-- **Live install monitor**: `RegNotifyChangeKeyValue` on the four `Uninstall` keys plus installer-process detection every 2 seconds; new programs appear within seconds and are highlighted, uninstall events are captured as well.
-- **Digital signature**: built-in Authenticode verification (`WinVerifyTrust` + `CryptQueryObject`), with `scripts/sign.ps1` supporting self-signed certificates, PFX files, thumbprints and timestamps — see [docs/SIGNING.md](docs/SIGNING.md).
-- **Leftover cleanup**: scans registry, install directory, `AppData` / `ProgramData`, Start-menu and desktop shortcuts, services and scheduled tasks; strong/weak keyword matching (weak hits unchecked by default), registry keys exported to `.reg`, folders go to the Recycle Bin.
+- **Scan**: merges the registry, MSI, Store packages, OEM driver packages, services, and installer uninstall files. The same program is one row, with its sources marked. Shortcuts, EXE version info, and directory snapshots identify portable apps; they stay hidden by default and cannot be uninstalled directly.
+- **Uninstall**: normal, silent, and force uninstall, plus a batch wizard that can be stopped mid-run.
+- **Leftover cleanup**: scans the registry, folders, shortcuts, services, and scheduled tasks. Files go to the Recycle Bin; registry keys are exported first. Shared system components such as runtimes cannot be uninstalled by default.
+- **Also**: live install monitor (including Store packages), CSV / HTML export. Signing tools are in [docs/SIGNING.md](docs/SIGNING.md).
 
 ---
 
@@ -54,14 +47,14 @@ Requirements:
 | Component | Version (as tested) |
 | --- | --- |
 | Visual Studio | 2022 / 2026 with the "Desktop development with C++" workload (MSVC 19.5x) |
-| Qt | 6.5 or newer, MSVC kit (tested 6.11.1 `msvc2022_64`) |
+| Qt | 6.10 or newer, MSVC kit (tested 6.11.1 `msvc2022_64`) |
 | CMake | 3.21+ (tested 3.30.5) |
 | Ninja | 1.10+ (tested 1.12.1) |
 
 One command (the script injects the MSVC environment itself, no developer prompt needed):
 
 ```powershell
-cd Cleveil-1.0.0            # the project root after clone/extract
+cd Cleveil-1.2.0            # the project root after clone/extract
 .\build.ps1                 # Release build + windeployqt deployment
 .\build.ps1 -Config Debug   # Debug build
 .\build.ps1 -Clean          # wipe build/ and start over
@@ -80,6 +73,7 @@ src/
 │  │                            delete, folder size, registry read/write/backup, process & service ops
 │  ├─ iconprovider.h/.cpp       three-level icon sources + cache + fallback placeholder drawing
 │  ├─ registryscanner.h/.cpp    four-way Uninstall scan, field parsing, dedupe
+│  ├─ inventory/                multi-source scan and merge (MSI, AppX, drivers, services, installer files, heuristics)
 │  ├─ uninstaller.h/.cpp        uninstall plan (MSI/EXE/silent), command splitting, QProcess & elevated runner
 │  ├─ leftovers.h/.cpp          leftover scan (registry/folders/shortcuts/services/tasks) + delete & backup
 │  ├─ remover.h/.cpp            force uninstall: kill processes, back up and delete the key, backup folder
@@ -93,7 +87,7 @@ src/
    ├─ batchwizard.h/.cpp        batch wizard (QWizard, three pages + sequential run + auto cleanup)
    ├─ monitordialog.h/.cpp      install monitor window (event stream + one-click uninstall + driver note)
    ├─ leftoverdialog.h/.cpp     leftover dialog (QtConcurrent background scan + progress + batch delete)
-   └─ settingsdialog.h/.cpp     settings dialog
+   └─ settingsdialog.h/.cpp     settings (multi-source and heuristic switches)
 resources/
 ├─ icon-1024.png                icon artwork
 ├─ icon-256.png / app.ico       runtime PNG / multi-size icon
