@@ -1021,7 +1021,7 @@ void MainWindow::showAbout()
     QMessageBox::about(
         this, QStringLiteral("关于 Cleveil"),
         QStringLiteral(
-            "<h3>Cleveil 1.2</h3>"
+            "<h3>Cleveil 1.2.1</h3>"
             "<p>Windows 程序卸载与残留清理工具。</p>"
             "<p><b>功能</b><br>"
             "· 多源枚举：ARP 注册表 + MSI API + AppX + OEM 驱动包 + 服务 + 安装器卸载文件<br>"

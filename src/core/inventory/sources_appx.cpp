@@ -35,11 +35,7 @@ namespace {
 QVector<InventoryRecord> scanViaWinRt(QVector<InventorySourceError> *errors)
 {
     QVector<InventoryRecord> out;
-    try {
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);
-    } catch (...) {
-        // 进程里可能已经初始化过其它公寓，继续尝试
-    }
+    ensureWinRtApartment();
 
     try {
         winrt::Windows::Management::Deployment::PackageManager pm;

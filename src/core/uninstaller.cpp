@@ -106,11 +106,7 @@ namespace {
 
 bool appxPackagePresent(const QString &fullName)
 {
-    try {
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);
-    } catch (...) {
-        // 进程已经是 STA（OleInitialize）时再要 MTA 会失败，沿用当前公寓即可
-    }
+    ensureWinRtApartment();
     try {
         winrt::Windows::Management::Deployment::PackageManager pm;
         auto pkg = pm.FindPackageForUser(L"", fullName.toStdWString());

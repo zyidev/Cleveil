@@ -34,11 +34,14 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("Cleveil"));
     QApplication::setOrganizationDomain(QStringLiteral("cleveil.local"));
     QApplication::setApplicationName(QStringLiteral("Cleveil"));
-    QApplication::setApplicationVersion(QStringLiteral("1.2.0"));
+    QApplication::setApplicationVersion(QStringLiteral("1.2.1"));
 
     // 应用图标：/icons/app.png 来自 resources/resources.qrc（编译进 exe）
     // 这样即使 exe 被改名、或从别处启动，窗口与任务栏图标依然是 Cleveil 的图
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/app.png")));
+
+    // WinRT AppX API 与 Shell OLE 必须同为 STA；顺序要在任何 PackageManager 调用之前。
+    un::ensureWinRtApartment();
 
     // Shell API（SHFileOperation / SHGetFileInfo）需要 OLE 初始化
     if (FAILED(OleInitialize(nullptr))) {

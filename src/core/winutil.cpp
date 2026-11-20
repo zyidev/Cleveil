@@ -24,7 +24,22 @@
 #include <string>
 #include <vector>
 
+#include <winrt/base.h>
+
 namespace un {
+
+void ensureWinRtApartment()
+{
+    static thread_local bool done = false;
+    if (done) return;
+    try {
+        // 与 OleInitialize(STA) 一致。若在已初始化的线程上再要 MTA 会直接 ACCESS_VIOLATION。
+        winrt::init_apartment(winrt::apartment_type::single_threaded);
+    } catch (...) {
+        // 已 RoInitialize / OleInitialize，沿用当前公寓
+    }
+    done = true;
+}
 
 // ---------------------------------------------------------------------------
 // 内部小工具
