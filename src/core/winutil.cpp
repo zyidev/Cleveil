@@ -778,6 +778,56 @@ bool deleteRegistryKey(const QString &fullPath, bool is64View, QString *error)
 }
 
 // 判断注册表键是否存在
+bool supplementFromUninstallKey(const QString &registryPath, bool is64View,
+                                QDate *installDate, qint64 *sizeBytes)
+{
+    HKEY root = nullptr;
+    QString sub;
+    if (!splitRegistryPath(registryPath, &root, &sub) || sub.isEmpty())
+        return false;
+
+    const DWORD view = is64View ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, toW(sub).c_str(), 0, KEY_READ | view, &key) != ERROR_SUCCESS)
+        return false;
+
+    bool any = false;
+    if (installDate && !installDate->isValid()) {
+        wchar_t buf[32] = {};
+        DWORD type = 0;
+        DWORD cb = sizeof(buf);
+        if (RegQueryValueExW(key, L"InstallDate", nullptr, &type,
+                             reinterpret_cast<LPBYTE>(buf), &cb) == ERROR_SUCCESS
+            && type == REG_SZ)
+        {
+            const QString raw = QString::fromWCharArray(buf).trimmed();
+            if (raw.size() == 8) {
+                const QDate d = QDate::fromString(raw, QStringLiteral("yyyyMMdd"));
+                if (d.isValid()) {
+                    *installDate = d;
+                    any = true;
+                }
+            }
+        }
+    }
+
+    if (sizeBytes && *sizeBytes < 0) {
+        DWORD dw = 0;
+        DWORD type = 0;
+        DWORD cb = sizeof(dw);
+        if (RegQueryValueExW(key, L"EstimatedSize", nullptr, &type,
+                             reinterpret_cast<LPBYTE>(&dw), &cb) == ERROR_SUCCESS
+            && (type == REG_DWORD || type == REG_QWORD) && dw > 0)
+        {
+            *sizeBytes = static_cast<qint64>(dw) * 1024;
+            any = true;
+        }
+    }
+
+    RegCloseKey(key);
+    return any;
+}
+
 bool registryKeyExists(const QString &fullPath, bool is64View)
 {
     HKEY root = nullptr;

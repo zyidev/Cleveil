@@ -5,6 +5,7 @@
 #include "core/inventory/source.h"
 #include "core/winutil.h"
 
+#include <QDate>
 #include <QDir>
 
 #ifndef NOMINMAX
@@ -21,6 +22,14 @@
 namespace un {
 
 namespace {
+
+QDate parseYmdInstallDate(const QString &raw)
+{
+    const QString s = raw.trimmed();
+    if (s.size() != 8) return QDate();
+    const QDate d = QDate::fromString(s, QStringLiteral("yyyyMMdd"));
+    return d.isValid() ? d : QDate();
+}
 
 QString msiProp(const wchar_t *product, const wchar_t *userSid, MSIINSTALLCONTEXT ctx,
                 const wchar_t *prop)
@@ -54,6 +63,8 @@ void appendProduct(const wchar_t *product, const wchar_t *sid, MSIINSTALLCONTEXT
     r.publisher = msiProp(product, sid, ctx, INSTALLPROPERTY_PUBLISHER);
     r.installLocation = QDir::toNativeSeparators(
         unquote(expandEnv(msiProp(product, sid, ctx, INSTALLPROPERTY_INSTALLLOCATION))));
+    r.installDate = parseYmdInstallDate(
+        msiProp(product, sid, ctx, INSTALLPROPERTY_INSTALLDATE));
     r.uninstallString = QStringLiteral("msiexec.exe /X%1").arg(r.productCode);
     r.quietUninstallString =
         QStringLiteral("msiexec.exe /X%1 /qn /norestart").arg(r.productCode);

@@ -9,7 +9,7 @@
 
 Windows 程序卸载与残留清理工具。已安装项来自 Windows 自身：注册表、MSI、应用商店包、OEM 驱动包、服务和安装器卸载文件。卸载仍交给程序自带的卸载器（MSI 走 `msiexec`）。
 
-当前版本 **1.2.1**（修复 1.2.0 安装后无法启动）。安装包见 [Releases](https://github.com/zyidev/Cleveil/releases) 的 `Cleveil-1.2.1-win64-setup.exe`，装到当前用户目录，不需要管理员权限。
+当前版本 **1.2.2**（修复列表中安装日期与占用空间缺失）。安装包见 [Releases](https://github.com/zyidev/Cleveil/releases) 的 `Cleveil-1.2.2-win64-setup.exe`，装到当前用户目录，不需要管理员权限。
 
 
 

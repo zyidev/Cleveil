@@ -7,6 +7,7 @@
 
 #include "core/appinfo.h"
 
+#include <QDate>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -78,6 +79,7 @@ struct InventoryRecord {
     QString productCode;       // MSI GUID / AppX full name / oemXX.inf
     QString registryPath;
     QString note;
+    QDate   installDate;
     qint64  sizeBytes = -1;
     bool    is64View = true;
     bool    systemComponent = false;

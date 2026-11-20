@@ -33,6 +33,7 @@ public:
                 r.quietUninstallString = app.quietUninstallString;
                 r.productCode = app.productCode;
                 r.registryPath = app.registryPath;
+                r.installDate = app.installDate;
                 r.sizeBytes = app.sizeBytes;
                 r.is64View = app.is64View;
                 r.systemComponent = app.systemComponent;

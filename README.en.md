@@ -9,7 +9,7 @@
 
 A Windows uninstaller and leftover cleaner. Installed items come from Windows itself: the registry, MSI, Store packages, OEM driver packages, services, and installer uninstall files. Uninstalling is still handed to each program's own uninstaller (MSI via `msiexec`).
 
-Current version **1.2.1** (fixes a startup crash in 1.2.0). Download `Cleveil-1.2.1-win64-setup.exe` from [Releases](https://github.com/zyidev/Cleveil/releases). It installs into the current user's folder and does not require administrator rights.
+Current version **1.2.2** (fixes missing install date and size columns). Download `Cleveil-1.2.2-win64-setup.exe` from [Releases](https://github.com/zyidev/Cleveil/releases). It installs into the current user's folder and does not require administrator rights.
 
 
 

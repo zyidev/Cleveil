@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("Cleveil"));
     QApplication::setOrganizationDomain(QStringLiteral("cleveil.local"));
     QApplication::setApplicationName(QStringLiteral("Cleveil"));
-    QApplication::setApplicationVersion(QStringLiteral("1.2.1"));
+    QApplication::setApplicationVersion(QStringLiteral("1.2.2"));
 
     // 应用图标：/icons/app.png 来自 resources/resources.qrc（编译进 exe）
     // 这样即使 exe 被改名、或从别处启动，窗口与任务栏图标依然是 Cleveil 的图

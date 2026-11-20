@@ -5,6 +5,7 @@
 //  这里集中所有"直接调 Win32 API"的代码，其它模块只管上层逻辑。
 // ============================================================================
 
+#include <QDate>
 #include <QImage>
 #include <QIcon>
 #include <QString>
@@ -111,6 +112,10 @@ QString formatBytes(qint64 bytes);
 // 解析 "HKEY_LOCAL_MACHINE\SOFTWARE\X" 形式为根键 + 子路径。
 // 支持 HKLM/HKCU/HKCR/HKU/HKCC 等简写。
 bool splitRegistryPath(const QString &fullPath, HKEY *root, QString *subPath);
+
+// 从 ARP Uninstall 登记项读取 InstallDate（yyyyMMdd）与 EstimatedSize（转为字节）
+bool supplementFromUninstallKey(const QString &registryPath, bool is64View,
+                                QDate *installDate, qint64 *sizeBytes);
 
 // 删除整棵注册表子树（值 + 所有子键 + 键本身）。
 bool deleteRegistryKey(const QString &fullPath, bool is64View, QString *error);

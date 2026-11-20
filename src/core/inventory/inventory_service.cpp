@@ -81,6 +81,8 @@ void mergeInto(InventoryRecord *dst, const InventoryRecord &src)
     if (dst->quietUninstallString.isEmpty()) dst->quietUninstallString = src.quietUninstallString;
     if (dst->productCode.isEmpty()) dst->productCode = src.productCode;
     if (dst->registryPath.isEmpty()) dst->registryPath = src.registryPath;
+    if (!dst->installDate.isValid() && src.installDate.isValid())
+        dst->installDate = src.installDate;
     if (dst->sizeBytes < 0 && src.sizeBytes >= 0) dst->sizeBytes = src.sizeBytes;
     if (dst->packageType == PackageType::Unknown) dst->packageType = src.packageType;
     dst->systemComponent = dst->systemComponent || src.systemComponent;
@@ -97,6 +99,39 @@ void mergeInto(InventoryRecord *dst, const InventoryRecord &src)
     }
 }
 
+void enrichInstalledApp(InstalledApp *app, int *directorySizeBudget)
+{
+    if (!app) return;
+
+    if ((!app->installDate.isValid() || app->sizeBytes < 0) && !app->registryPath.isEmpty()) {
+        QDate d = app->installDate;
+        qint64 sz = app->sizeBytes;
+        if (supplementFromUninstallKey(app->registryPath, app->is64View,
+                                       app->installDate.isValid() ? nullptr : &d,
+                                       app->sizeBytes >= 0 ? nullptr : &sz))
+        {
+            if (!app->installDate.isValid() && d.isValid())
+                app->installDate = d;
+            if (app->sizeBytes < 0 && sz >= 0)
+                app->sizeBytes = sz;
+        }
+    }
+
+    if (app->sizeBytes < 0 && directorySizeBudget && *directorySizeBudget > 0) {
+        const QString loc = app->installLocation.trimmed();
+        if (!loc.isEmpty() && !isDangerousPath(loc)) {
+            const QFileInfo fi(loc);
+            if (fi.isDir()) {
+                const qint64 measured = directorySize(loc, 5);
+                if (measured >= 0) {
+                    app->sizeBytes = measured;
+                    --(*directorySizeBudget);
+                }
+            }
+        }
+    }
+}
+
 InstalledApp toInstalledApp(const InventoryRecord &r, const QStringList &sourceTags)
 {
     InstalledApp app;
@@ -110,6 +145,7 @@ InstalledApp toInstalledApp(const InventoryRecord &r, const QStringList &sourceT
     app.quietUninstallString = r.quietUninstallString;
     app.productCode = r.productCode;
     app.registryPath = r.registryPath;
+    app.installDate = r.installDate;
     app.sizeBytes = r.sizeBytes;
     app.is64View = r.is64View;
     app.systemComponent = r.systemComponent;
@@ -271,10 +307,13 @@ InventoryScanResult mergeAll(const QVector<InventoryRecord> &raw,
     result.heuristic = filteredHeuristic;
 
     // 投影软件列表
+    int dirSizeBudget = 150;
     for (auto it = softwareBuckets.constBegin(); it != softwareBuckets.constEnd(); ++it) {
         QStringList tags = QStringList(it->sourceTags.values());
         tags.sort(Qt::CaseInsensitive);
-        result.software.push_back(toInstalledApp(it->primary, tags));
+        InstalledApp app = toInstalledApp(it->primary, tags);
+        enrichInstalledApp(&app, &dirSizeBudget);
+        result.software.push_back(app);
     }
 
     std::sort(result.software.begin(), result.software.end(),
@@ -404,11 +443,13 @@ QVector<InstalledApp> InventoryService::projectApps(const InventoryScanResult &b
                                                     bool includeOrphanServices)
 {
     QVector<InstalledApp> apps = bundle.software;
+    int dirSizeBudget = 40;
     for (const InventoryRecord &d : bundle.drivers) {
         InstalledApp a = toInstalledApp(d, {inventorySourceText(d.source)});
         a.type = PackageType::Driver;
         a.uninstallString.clear();
         a.quietUninstallString.clear();
+        enrichInstalledApp(&a, &dirSizeBudget);
         apps.push_back(a);
     }
     if (includeOrphanServices) {
@@ -416,6 +457,7 @@ QVector<InstalledApp> InventoryService::projectApps(const InventoryScanResult &b
             if (s.whitelistBlocked) continue;
             InstalledApp a = toInstalledApp(s, {inventorySourceText(s.source)});
             a.type = PackageType::Service;
+            enrichInstalledApp(&a, &dirSizeBudget);
             apps.push_back(a);
         }
     }
